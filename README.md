@@ -7,7 +7,7 @@ inventario físico y reportes.
 ## Stack
 
 - **Next.js 16** (App Router) + TypeScript
-- **Prisma** + **SQLite** (fácilmente reemplazable por Postgres/MySQL cambiando `DATABASE_URL`)
+- **Prisma** + **PostgreSQL** (pensado para usar una base gratuita de [Supabase](https://supabase.com))
 - **NextAuth v5** (credenciales de usuario/contraseña, sesiones JWT)
 - **Socket.IO** sobre un servidor Node personalizado para stock en tiempo real
 - **Tailwind CSS v4** con modo oscuro
@@ -15,10 +15,19 @@ inventario físico y reportes.
 
 ## Puesta en marcha
 
+### 1. Crear la base de datos en Supabase
+
+1. Crear un proyecto gratuito en [supabase.com](https://supabase.com).
+2. Ir a **Project Settings → Database → Connection string**.
+3. Copiar la conexión **Transaction pooler** (puerto `6543`) y la **Direct connection** (puerto `5432`).
+
+### 2. Configurar y correr la app
+
 ```bash
 npm install
-cp .env.example .env        # completar AUTH_SECRET con un valor propio
-npm run db:push             # crea las tablas en SQLite
+cp .env.example .env
+# completar en .env: DATABASE_URL, DIRECT_URL (de Supabase) y AUTH_SECRET (un valor propio y aleatorio)
+npm run db:push             # crea las tablas en la base de Supabase
 npm run db:seed             # crea usuarios y premios de ejemplo
 npm run dev                 # levanta el servidor (Next.js + Socket.IO)
 ```
