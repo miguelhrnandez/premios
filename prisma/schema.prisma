@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  USUARIO
+}
+
+enum EstadoStock {
+  OK
+  BAJO
+  AGOTADO
+}
+
+enum TipoMovimiento {
+  INGRESO
+  SALIDA
+  AJUSTE
+}
+
+model Usuario {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  password     String
+  nombre       String
+  rol          Role     @default(USUARIO)
+  activo       Boolean  @default(true)
+  creadoEn     DateTime @default(now())
+
+  movimientos  Movimiento[]
+  ajustes      Ajuste[]
+  inventarios  Inventario[]
+  auditorias   Auditoria[]
+}
+
+model Categoria {
+  id      String   @id @default(cuid())
+  nombre  String   @unique
+  premios Premio[]
+}
+
+model Premio {
+  id           String   @id @default(cuid())
+  codigo       String   @unique
+  nombre       String
+  descripcion  String?
+  imagenUrl    String?
+  categoriaId  String?
+  categoria    Categoria? @relation(fields: [categoriaId], references: [id])
+  stockActual  Int      @default(0)
+  stockMinimo  Int      @default(0)
+  activo       Boolean  @default(true)
+  creadoEn     DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  movimientos  Movimiento[]
+  inventarios  Inventario[]
+
+  @@index([nombre])
+}
+
+model Movimiento {
+  id             String         @id @default(cuid())
+  tipo           TipoMovimiento
+  premioId       String
+  premio         Premio         @relation(fields: [premioId], references: [id])
+  usuarioId      String
+  usuario        Usuario        @relation(fields: [usuarioId], references: [id])
+  cantidad       Int
+  stockAnterior  Int
+  stockActual    Int
+  motivo         String?
+  observacion    String?
+  anulado        Boolean        @default(false)
+  creadoEn       DateTime       @default(now())
+
+  ajuste         Ajuste?
+  auditorias     Auditoria[]
+
+  @@index([premioId])
+  @@index([usuarioId])
+  @@index([creadoEn])
+  @@index([tipo])
+}
+
+model Ajuste {
+  id             String     @id @default(cuid())
+  movimientoId   String     @unique
+  movimiento     Movimiento @relation(fields: [movimientoId], references: [id])
+  stockSistema   Int
+  stockFisico    Int
+  diferencia     Int
+  motivo         String
+  usuarioId      String
+  usuario        Usuario    @relation(fields: [usuarioId], references: [id])
+  creadoEn       DateTime   @default(now())
+}
+
+model Inventario {
+  id            String   @id @default(cuid())
+  premioId      String
+  premio        Premio   @relation(fields: [premioId], references: [id])
+  usuarioId     String
+  usuario       Usuario  @relation(fields: [usuarioId], references: [id])
+  stockSistema  Int
+  stockFisico   Int
+  diferencia    Int
+  motivo        String?
+  ajustado      Boolean  @default(false)
+  creadoEn      DateTime @default(now())
+}
+
+model Auditoria {
+  id            String    @id @default(cuid())
+  entidad       String
+  entidadId     String
+  accion        String
+  usuarioId     String
+  usuario       Usuario   @relation(fields: [usuarioId], references: [id])
+  datosAntes    String?
+  datosDespues  String?
+  motivo        String?
+  movimientoId  String?
+  movimiento    Movimiento? @relation(fields: [movimientoId], references: [id])
+  creadoEn      DateTime  @default(now())
+
+  @@index([entidad, entidadId])
+}
