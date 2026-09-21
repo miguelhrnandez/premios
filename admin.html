@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Panel de Jefa - Fichaje</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/bcryptjs@2.4.3/dist/bcrypt.min.js"></script>  
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
@@ -820,6 +821,19 @@ const PUNCH_TYPE_LABELS = {
 const DAY_NAMES = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
 
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  
+// ============ HASH DE CONTRASEÑAS ============
+function verifyPassword(inputPassword, storedPassword){
+  if(!storedPassword)return false;
+  if(storedPassword.startsWith('$2')){
+    try{return dcodeIO.bcrypt.compareSync(inputPassword, storedPassword);}
+    catch(e){console.error('Error verificando hash:',e);return false;}
+  }
+  return inputPassword === storedPassword;
+}
+function hashPassword(password){
+  return dcodeIO.bcrypt.hashSync(password, 10);
+}
 
 let currentUser=null,teams=[],employees=[],inactiveEmployees=[];
 let allPunches=[],allShifts=[],monthShifts=[],monthAbsences=[];
@@ -840,7 +854,10 @@ async function doLogin(){
   if(!username||!password){errBox.textContent='Completá los campos';errBox.classList.add('show');return;}
   try{
     const {data}=await db.from('employees').select('*, teams(name)').eq('username',username).eq('active',true).single();
-    if(!data||data.password!==password){errBox.textContent='Usuario o contraseña incorrectos';errBox.classList.add('show');return;}
+      if(!data){errBox.textContent='Usuario o contraseña incorrectos';errBox.classList.add('show');return;}
+    if(!verifyPassword(password, data.password)){
+      errBox.textContent='Usuario o contraseña incorrectos';errBox.classList.add('show');return;
+    }
     if(!data.is_manager&&!data.is_admin){document.getElementById('loginScreen').classList.remove('show');document.getElementById('noPermissionScreen').classList.add('show');return;}
     currentUser=data;
     document.getElementById('loginScreen').classList.remove('show');
