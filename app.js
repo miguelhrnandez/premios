@@ -1648,7 +1648,12 @@ VIEWS.rapido = {
     const rm = t.closest('[data-rm]');
     if (rm) { delete R.cart[rm.dataset.rm]; this.paintGrid(); this.paintBar(); icons(); return; }
     if (t.closest('#rp-quien-sel')) return;
-    if (t.closest('#rp-clear')) { R.cart = {}; R.obs = ''; R.nota = false; this.paintGrid(); this.paintBar(); icons(); return; }
+    if (t.closest('#rp-clear')) {
+      const antes = { cart: { ...R.cart }, obs: R.obs, nota: R.nota };
+      R.cart = {}; R.obs = ''; R.nota = false; this.paintGrid(); this.paintBar(); icons();
+      toast('Se vació la selección.', 'info', 6000, { label: 'Deshacer', onClick: async () => { Object.assign(R, antes); this.paintGrid(); this.paintBar(); icons(); } });
+      return;
+    }
     if (t.closest('#rp-nota')) { R.nota = !R.nota; this.paintBar(); icons(); if (R.nota) setTimeout(() => $('#rp-obs') && $('#rp-obs').focus(), 30); return; }
     if (t.closest('#rp-go-falta')) { const s = $('#rp-quien-sel'); if (s) { s.classList.add('falta'); s.scrollIntoView({ behavior: 'smooth', block: 'center' }); s.focus(); } toast('Elige tu nombre en "¿Quién eres?".', 'warn', 3000); return; }
     if (t.closest('#rp-go')) this.submit();
@@ -1718,11 +1723,13 @@ VIEWS.rapido = {
     if (!R.sector || !S.sectores.length) { bar.innerHTML = `<span class="muted">${S.publico ? 'Elige tu equipo para empezar.' : 'Elige tu sector para empezar.'}</span>`; return; }
     bar.innerHTML = `
       ${R.nota ? `<input class="in rap-obs" id="rp-obs" placeholder="Nota opcional (ej.: acción en vereda)" value="${esc(R.obs)}" maxlength="200">` : ''}
-      <div class="cart">${tot ? items.map(i => `<button class="cart-i" data-rm="${i.p.id}" title="Quitar">${i.n} × ${esc(i.p.nombre)} ${ic('x', 's')}</button>`).join('')
-        : `<span class="muted small" style="align-self:center">Toca los premios que retiras: cada toque suma 1.</span>`}</div>
+      <div class="cart-row">
+        ${tot ? `<button class="btn ghost sm rap-clear" id="rp-clear" title="Vaciar la selección">${ic('trash-2', 's')}Vaciar</button>` : ''}
+        <div class="cart">${tot ? items.map(i => `<button class="cart-i" data-rm="${i.p.id}" title="Quitar">${i.n} × ${esc(i.p.nombre)} ${ic('x', 's')}</button>`).join('')
+          : `<span class="muted small" style="align-self:center">Toca los premios que retiras: cada toque suma 1.</span>`}</div>
+      </div>
       <div class="rap-acts">
         <button class="btn icon ${R.nota || R.obs ? 'on-note' : ''}" id="rp-nota" title="Agregar nota" aria-label="Agregar nota">${ic('message-square-text')}</button>
-        ${tot ? `<button class="btn icon" id="rp-clear" title="Vaciar" aria-label="Vaciar">${ic('trash-2')}</button>` : ''}
         ${S.publico && !R.integrante && tot
           ? `<button class="btn pri lg rap-go" id="rp-go-falta">${ic('user-round', 's')}Elige tu nombre</button>`
           : `<button class="btn pri lg rap-go" id="rp-go" ${tot ? '' : 'disabled'}>${tot ? `Registrar ${tot}` : 'Registrar'}</button>`}
