@@ -60,8 +60,9 @@ const ALERTAS = {
 const TODOS = ['admin', 'usuario', 'supervisor'];
 const NAV = [
   { id: 'dashboard',     t: 'Dashboard',            i: 'layout-dashboard', roles: ['admin'] },
-  { id: 'rapido',        t: 'Retiro rápido',        i: 'zap',              roles: ['admin', 'usuario'] },
+  { id: 'rapido',        t: 'Retiro rápido',        i: 'zap',              roles: ['admin', 'usuario', 'supervisor'] },
   { id: 'consumo',       t: 'Consumo por sector',   i: 'chart-pie',        roles: ['admin', 'supervisor'] },
+  { id: 'cargar',        t: 'Cargar stock',         i: 'package-plus',     roles: ['supervisor'] },
   { id: 'equipo',        t: 'Mi equipo',            i: 'users-round',      roles: ['admin', 'supervisor'] },
   { id: 'stock',         t: 'Stock de Premios',     i: 'boxes',            roles: TODOS },
   { id: 'movimiento',    t: 'Registrar Movimiento', i: 'arrow-left-right', roles: ['admin'] },
@@ -77,7 +78,7 @@ const NAV = [
 const ROLES = {
   admin:      { t: 'Administrador',     s: 'Ve y hace todo',                              i: 'shield-check', c: 't-correccion' },
   usuario:    { t: 'Retiro de premios', s: 'Solo retira premios y ve el stock',           i: 'zap',          c: 't-salida' },
-  supervisor: { t: 'Jefe de sector',    s: 'Solo consulta lo retirado en sus sectores',   i: 'eye',          c: 't-ajuste' }
+  supervisor: { t: 'Jefe de sector',    s: 'Retira y carga stock de su equipo; consulta lo retirado', i: 'eye', c: 't-ajuste' }
 };
 const rolBadge = r => { const x = ROLES[r] || ROLES.usuario; return `<span class="badge ${x.c}">${ic(x.i)}${x.t}</span>`; };
 const inicioDe = r => r === 'admin' ? 'dashboard' : r === 'supervisor' ? 'consumo' : 'rapido';
@@ -96,7 +97,7 @@ const S = {
 const rolActual = () => (S.perfil ? S.perfil.rol : '');
 const isAdmin = () => rolActual() === 'admin';
 const isJefe = () => rolActual() === 'supervisor';
-const puedeRetirar = () => ['admin', 'usuario'].includes(rolActual());
+const puedeRetirar = () => ['admin', 'usuario', 'supervisor'].includes(rolActual());
 function defaultsF() {
   const hoy = ymd(new Date());
   return {
@@ -128,7 +129,7 @@ const sectorDe = id => S.sectores.find(x => x.id === Number(id));
 const sectorLabel = x => x ? (x.grupo ? `${x.grupo} · ${x.nombre}` : x.nombre) : '';
 const sectoresActivos = () => S.sectores.filter(x => x.activo).sort((a, b) => a.orden - b.orden || a.nombre.localeCompare(b.nombre, 'es'));
 const sectoresRetiro = () => {
-  const ids = (S.perfil && S.perfil.rol === 'usuario' && S.perfil.sector_ids) || [];
+  const ids = (S.perfil && ['usuario', 'supervisor'].includes(S.perfil.rol) && S.perfil.sector_ids) || [];
   return ids.length ? sectoresActivos().filter(x => ids.includes(x.id)) : sectoresActivos();
 };
 const sectoresConsulta = () => {
@@ -1204,6 +1205,7 @@ VIEWS.stock = {
           else { S.rap.cart[id] = Math.min((S.rap.cart[id] || 0) + 1, p.stock_actual); go('rapido'); }
           break;
         case 'ingresar': go('movimiento', { premio: id, tipo: 'ingreso' }); break;
+        case 'cargar': go('cargar', { premio: id }); break;
         case 'quien': modalQuien(id); break;
         case 'hist': go('historial', { premio: id }); break;
         case 'editar': modalPremio(p); break;
@@ -1242,7 +1244,7 @@ VIEWS.stock = {
       return;
     }
     tb.innerHTML = rows.map(p => {
-      const acts = `${p.activo && p.stock_actual > 0 && puedeRetirar() ? `<button class="btn go" data-act="retirar" data-id="${p.id}" title="Registrar un retiro">Retirar</button>` : ''}
+      const acts = `${p.activo && isJefe() ? `<button class="btn go" data-act="cargar" data-id="${p.id}" title="Cargar stock que llegó">Cargar</button>` : ''}${p.activo && p.stock_actual > 0 && puedeRetirar() ? `<button class="btn go" data-act="retirar" data-id="${p.id}" title="Registrar un retiro">Retirar</button>` : ''}
           ${admin ? `
             ${p.activo ? `<button class="btn" data-act="ingresar" data-id="${p.id}" title="Registrar ingreso" aria-label="Registrar ingreso">${ic('package-plus', 's')}</button>` : ''}
             <button class="btn" data-act="quien" data-id="${p.id}" title="¿Quién lo sacó?" aria-label="¿Quién lo sacó?">${ic('user-search', 's')}</button>
@@ -1432,7 +1434,8 @@ VIEWS.movimiento = {
   mount(el) {
     const f = S.f.mov, admin = isAdmin();
     if (S.params.tipo && (admin || S.params.tipo === 'salida')) f.tipo = S.params.tipo;
-    if (!admin) f.tipo = 'salida';
+    if (isJefe()) f.tipo = 'ingreso';
+    else if (!admin) f.tipo = 'salida';
     if (S.params.premio) f.premioId = +S.params.premio;
     if (f.premioId && !(premio(f.premioId) || {}).activo) f.premioId = null;
     el.innerHTML = `
@@ -1581,7 +1584,19 @@ VIEWS.movimiento = {
               S.sectores.length ? { p_sector_id: f.tipo === 'salida' && $('#m-sec') && $('#m-sec').value ? +$('#m-sec').value : null } : {}));
         aplicarMovLocal(mov);
         const verbo = { salida: 'Retiro registrado', ingreso: 'Ingreso registrado', ajuste: 'Ajuste registrado' }[f.tipo];
-        toast(`<b>${verbo}.</b> ${esc(c.p.nombre)}: ${fNum(mov.stock_anterior)} → ${fNum(mov.stock_nuevo)} unidades.`, 'ok');
+        const deshacer = f.tipo === 'ingreso' ? {
+          label: 'Deshacer',
+          onClick: async () => {
+            try {
+              const an = await API.rpc('deshacer_ingreso', { p_id: mov.id });
+              const o = S.movs.find(x => x.id === mov.id); if (o) o.estado = 'anulado';
+              aplicarMovLocal(an);
+              toast('Carga deshecha. El stock volvió a como estaba.', 'info', 4000);
+              paintCurrent();
+            } catch (er) { toast(esc(errMsg(er)), 'bad', 7000); }
+          }
+        } : null;
+        toast(`<b>${f.tipo === 'ingreso' && isJefe() ? 'Stock cargado' : verbo}.</b> ${esc(c.p.nombre)}: ${fNum(mov.stock_anterior)} → ${fNum(mov.stock_nuevo)} unidades.`, 'ok', deshacer ? 10000 : 5000, deshacer);
         $('#m-obs').value = '';
         $('#m-n').value = f.tipo === 'ajuste' ? '' : 1;
         this.paint(); icons(); applyFlashes();
@@ -1963,6 +1978,30 @@ VIEWS.equipo = {
       <button class="btn" data-int="${x.id}" data-a="tog" title="${x.activo ? 'Dar de baja' : 'Activar'}" aria-label="${x.activo ? 'Dar de baja' : 'Activar'}">${ic(x.activo ? 'user-x' : 'user-check', 's')}</button></div></li>`;
     box.innerHTML = act.length || inact.length ? act.map(fila).join('') + inact.map(fila).join('')
       : `<li><div class="empty" style="width:100%">${ic('users')}<b>Todavía no hay nadie en este equipo</b>Agrega a las personas para que aparezcan en "¿Quién eres?".</div></li>`;
+  }
+};
+
+/* =============================================================
+   VISTA: CARGAR STOCK (jefes: solo ingresos)
+   ============================================================= */
+VIEWS.cargar = {
+  title: () => 'Cargar stock',
+  mount(el) {
+    S.f.mov.tipo = 'ingreso';
+    el.innerHTML = `<div class="callout info" style="margin-bottom:14px">${ic('package-plus', 's')}<span>Cuando llega mercadería: elige el premio, escribe cuántas unidades llegaron y toca <b>Registrar ingreso</b>. Si te equivocas, tienes <b>Deshacer</b> durante 10 minutos.</span></div>
+      <div id="cg-form"></div>
+      <div class="panel mt"><div class="panel-h"><h2>Tus últimas cargas</h2></div><div class="panel-b flush"><ul class="list" id="cg-list"></ul></div></div>`;
+    VIEWS.movimiento.mount.call(VIEWS.movimiento, $('#cg-form'));
+    this.paintList();
+  },
+  paint() { VIEWS.movimiento.paint.call(VIEWS.movimiento); this.paintList(); },
+  paintList() {
+    const box = $('#cg-list'); if (!box) return;
+    const mias = S.movs.filter(m => m.usuario_id === S.perfil.id && m.tipo === 'ingreso').slice(0, 15);
+    box.innerHTML = mias.length ? mias.map(m => `<li class="${m.estado === 'anulado' ? 'void' : ''}"><span class="mv-ic t-ingreso">${ic('package-plus', 's')}</span>
+      <div class="grow"><div class="t1">${esc(pNombre(m))}</div><div class="t2">${fFecha(m.creado_en)} ${fHora(m.creado_en)}${m.estado === 'anulado' ? ' · deshecha' : ''}${m.observacion ? ` · ${esc(trunc(m.observacion, 50))}` : ''}</div></div>
+      <span class="v diff-pos">+${fNum(m.cantidad)}</span></li>`).join('')
+      : `<li><div class="empty" style="width:100%">${ic('package-plus')}<b>Todavía no cargaste stock</b>Cuando registres un ingreso aparecerá aquí.</div></li>`;
   }
 };
 
