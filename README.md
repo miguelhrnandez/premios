@@ -14,6 +14,7 @@ app.js                Lógica de la aplicación
 config.js             Datos de conexión a Supabase (completar)
 supabase/schema.sql   Base de datos completa: tablas, seguridad, funciones, auditoría
 supabase/migracion_02_retiro_rapido.sql   Sectores y Retiro rápido (ejecutar después de schema.sql)
+supabase/migracion_03_roles.sql           Roles: retiro de premios y jefe de sector (ejecutar después de la 02)
 ```
 
 ---
@@ -35,6 +36,9 @@ supabase/migracion_02_retiro_rapido.sql   Sectores y Retiro rápido (ejecutar de
 Esto crea todas las tablas, las reglas de seguridad, el tiempo real y el espacio para las imágenes de los premios.
 
 4. Abre otra **New query**, pega el contenido de `supabase/migracion_02_retiro_rapido.sql` y presiona **Run**. Agrega los sectores (Promoción; Salón: Recepción, Pretest, Full test; Ventas) y el Retiro rápido. Se puede ejecutar de nuevo sin problema: no borra datos.
+5. Haz lo mismo con `supabase/migracion_03_roles.sql` (roles y sectores por usuario).
+
+Orden siempre: `schema.sql` → `migracion_02` → `migracion_03`.
 
 ### 3. Configurar el inicio de sesión
 
@@ -68,14 +72,26 @@ La clave publicable es pública por diseño: la seguridad la garantizan las regl
 ### 6. Primer ingreso
 
 1. Abre la dirección de la app. Como todavía no hay usuarios, aparece **Crear el administrador**.
-2. Completa nombre, usuario y contraseña. Esa cuenta queda como **Administrador**.
+2. Completa nombre, usuario y un **PIN** de 4 a 6 números (para el administrador conviene 6). Esa cuenta queda como **Administrador**.
 3. En **Configuración** revisa el nombre de la sucursal y las categorías.
-4. En **Usuarios › Nuevo usuario** crea las cuentas del equipo (rol *Usuario* o *Administrador*).
+4. En **Usuarios › Nuevo usuario** crea las cuentas del equipo: nombre, usuario, PIN, qué puede hacer y sus sectores. La app muestra el usuario y el PIN para que se los pases a la persona.
 5. En **Stock de Premios › Nuevo premio** carga los premios (con stock inicial, que se registra como ingreso).
 
 ---
 
 ## Cómo funciona
+
+### Ingreso con PIN
+
+Cada persona entra con su **usuario y un PIN de 4 a 6 números**, con un teclado grande en pantalla. El teléfono recuerda quién fue el último en entrar, así que las siguientes veces solo se escribe el PIN, y la sesión queda abierta hasta que se toca "Cerrar sesión". "No soy…" permite cambiar de persona en un teléfono compartido.
+
+Si el administrador se creó antes con una contraseña común, puede entrar con **Usar contraseña** y luego pasarse a PIN en **Configuración › Mi PIN**.
+
+### Quién puede hacer qué
+
+- **Administrador:** todo (dashboard, stock, ingresos, ajustes, inventario, historial, reportes, usuarios, auditoría).
+- **Retiro de premios** (promotores, recepción, salón, ventas): solo **Retiro rápido**, ver el stock y **Mis retiros**. Si tiene un único sector asignado, el retiro rápido ya lo trae elegido.
+- **Jefe de sector** (líder de promotores, de salón, de ventas): **solo consulta**. Ve en **Consumo** qué se retiró, quién lo retiró, y la fecha y hora exactas, agrupado por día (hoy, semana, mes, mes anterior), y lo puede exportar a Excel o PDF. No puede cargar nada; la base de datos lo bloquea. Un jefe general se crea igual pero **sin marcar sectores**, y ve todos.
 
 ### Retiro rápido (reemplazo del grupo de WhatsApp)
 
@@ -92,16 +108,15 @@ Los administradores pueden agregar, renombrar, agrupar, ordenar o desactivar sec
 
 ### Roles
 
-| | Administrador | Usuario |
-|---|---|---|
-| Ver stock y dashboard | Sí | Sí |
-| Retiro rápido por sector y registrar retiros | Sí | Sí |
-| Deshacer sus propios retiros (10 min) | Sí | Sí |
-| Registrar ingresos y ajustes | Sí | No |
-| Crear, editar, desactivar o eliminar premios | Sí | No |
-| Historial completo, "¿quién lo sacó?" | Sí | Solo su propio historial |
-| Corregir o anular movimientos | Sí | No |
-| Inventario, reportes, usuarios, auditoría | Sí | No |
+| | Administrador | Retiro de premios | Jefe de sector |
+|---|---|---|---|
+| Ver stock | Sí | Sí | Sí |
+| Retiro rápido | Sí | Sí (sus sectores) | No |
+| Deshacer sus propios retiros (10 min) | Sí | Sí | No |
+| Consumo por sector con fecha y hora | Todos | No | Sus sectores |
+| Ingresos, ajustes, inventario | Sí | No | No |
+| Premios, usuarios, reportes, auditoría | Sí | No | No |
+| Historial | Completo | Solo el propio | Solo sus sectores |
 
 Los permisos se controlan **en la base de datos**, no solo en la pantalla: aunque alguien manipule la página, Supabase rechaza la operación.
 
@@ -138,7 +153,9 @@ Historial, reportes, inventarios, perfiles y auditoría se exportan a **Excel**,
 
 ## Preguntas frecuentes
 
-**Un usuario olvidó su contraseña.** Administrador › Usuarios › ícono de llave › nueva contraseña.
+**Alguien olvidó su PIN.** Administrador › Usuarios › ícono de llave › nuevo PIN.
+
+**¿Un PIN de 4 números es seguro?** Para una herramienta interna alcanza: Supabase frena los intentos repetidos de ingreso. Para administradores conviene usar 6 números.
 
 **¿Puedo cambiar el nombre de usuario de alguien?** No (es su credencial). Crea un usuario nuevo y desactiva el anterior; el historial del anterior se conserva.
 

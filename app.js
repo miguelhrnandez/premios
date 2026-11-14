@@ -57,20 +57,30 @@ const ALERTAS = {
   ajuste_importante:     { t: 'Ajuste importante',        i: 'scale',          c: 'warn' },
   diferencia_inventario: { t: 'Diferencia de inventario', i: 'clipboard-list', c: 'warn' }
 };
+const TODOS = ['admin', 'usuario', 'supervisor'];
 const NAV = [
-  { id: 'dashboard',     t: 'Dashboard',            i: 'layout-dashboard' },
-  { id: 'rapido',        t: 'Retiro rápido',        i: 'zap' },
-  { id: 'stock',         t: 'Stock de Premios',     i: 'boxes' },
-  { id: 'movimiento',    t: 'Registrar Movimiento', i: 'arrow-left-right' },
-  { id: 'historial',     t: 'Historial',            i: 'history',         admin: true },
-  { id: 'inventario',    t: 'Inventario',           i: 'clipboard-check', admin: true },
-  { id: 'reportes',      t: 'Reportes',             i: 'chart-column',    admin: true },
-  { id: 'usuarios',      t: 'Usuarios',             i: 'users',           admin: true },
-  { id: 'auditoria',     t: 'Auditoría',            i: 'shield-check',    admin: true },
+  { id: 'dashboard',     t: 'Dashboard',            i: 'layout-dashboard', roles: ['admin'] },
+  { id: 'rapido',        t: 'Retiro rápido',        i: 'zap',              roles: ['admin', 'usuario'] },
+  { id: 'consumo',       t: 'Consumo por sector',   i: 'chart-pie',        roles: ['admin', 'supervisor'] },
+  { id: 'stock',         t: 'Stock de Premios',     i: 'boxes',            roles: TODOS },
+  { id: 'movimiento',    t: 'Registrar Movimiento', i: 'arrow-left-right', roles: ['admin'] },
+  { id: 'historial',     t: 'Historial',            i: 'history',          roles: ['admin'] },
+  { id: 'inventario',    t: 'Inventario',           i: 'clipboard-check',  roles: ['admin'] },
+  { id: 'reportes',      t: 'Reportes',             i: 'chart-column',     roles: ['admin'] },
+  { id: 'usuarios',      t: 'Usuarios',             i: 'users',            roles: ['admin'] },
+  { id: 'auditoria',     t: 'Auditoría',            i: 'shield-check',     roles: ['admin'] },
   { sep: 'Cuenta' },
-  { id: 'perfil',        t: 'Mi perfil',            i: 'circle-user-round' },
-  { id: 'configuracion', t: 'Configuración',        i: 'settings' }
+  { id: 'perfil',        t: 'Mi perfil',            i: 'circle-user-round', roles: ['admin', 'usuario'] },
+  { id: 'configuracion', t: 'Configuración',        i: 'settings',         roles: TODOS }
 ];
+const ROLES = {
+  admin:      { t: 'Administrador',     s: 'Ve y hace todo',                              i: 'shield-check', c: 't-correccion' },
+  usuario:    { t: 'Retiro de premios', s: 'Solo retira premios y ve el stock',           i: 'zap',          c: 't-salida' },
+  supervisor: { t: 'Jefe de sector',    s: 'Solo consulta lo retirado en sus sectores',   i: 'eye',          c: 't-ajuste' }
+};
+const rolBadge = r => { const x = ROLES[r] || ROLES.usuario; return `<span class="badge ${x.c}">${ic(x.i)}${x.t}</span>`; };
+const inicioDe = r => r === 'admin' ? 'dashboard' : r === 'supervisor' ? 'consumo' : 'rapido';
+
 
 /* ---------------- estado ---------------- */
 let API = null;
@@ -82,7 +92,10 @@ const S = {
   live: 'off', unsub: null, lastSync: 0, wasOff: false,
   f: null, invCounts: {}
 };
-const isAdmin = () => S.perfil && S.perfil.rol === 'admin';
+const rolActual = () => (S.perfil ? S.perfil.rol : '');
+const isAdmin = () => rolActual() === 'admin';
+const isJefe = () => rolActual() === 'supervisor';
+const puedeRetirar = () => ['admin', 'usuario'].includes(rolActual());
 function defaultsF() {
   const hoy = ymd(new Date());
   return {
@@ -93,6 +106,7 @@ function defaultsF() {
     usr:   { q: '', rol: '' },
     aud:   { q: '', tabla: '', desde: '', hasta: '' },
     perf:  { q: '', tipo: '', page: 0 },
+    cons:  { sector: '', per: 'hoy', n: 30 },
     inv:   { q: '', cat: '' }
   };
 }
@@ -112,6 +126,15 @@ const byName = (a, b) => a.nombre.localeCompare(b.nombre, 'es');
 const sectorDe = id => S.sectores.find(x => x.id === Number(id));
 const sectorLabel = x => x ? (x.grupo ? `${x.grupo} · ${x.nombre}` : x.nombre) : '';
 const sectoresActivos = () => S.sectores.filter(x => x.activo).sort((a, b) => a.orden - b.orden || a.nombre.localeCompare(b.nombre, 'es'));
+const sectoresRetiro = () => {
+  const ids = (S.perfil && S.perfil.rol === 'usuario' && S.perfil.sector_ids) || [];
+  return ids.length ? sectoresActivos().filter(x => ids.includes(x.id)) : sectoresActivos();
+};
+const sectoresConsulta = () => {
+  const ids = (S.perfil && S.perfil.rol === 'supervisor' && S.perfil.sector_ids) || [];
+  const all = S.sectores.slice().sort((a, b) => a.orden - b.orden);
+  return ids.length ? all.filter(x => ids.includes(x.id)) : all;
+};
 const lsSector = () => `sp_sector_${S.perfil ? S.perfil.id : ''}`;
 const optSectores = (sel, todos) => (todos ? S.sectores.slice().sort((a, b) => a.orden - b.orden) : sectoresActivos())
   .map(x => `<option value="${x.id}" ${String(sel) === String(x.id) ? 'selected' : ''}>${esc(sectorLabel(x))}${x.activo ? '' : ' (inactivo)'}</option>`).join('');
@@ -212,7 +235,7 @@ function createAPI(sb) {
     async editarCategoria(id, nombre) { return T(await sb.from('categorias').update({ nombre }).eq('id', id).select().single()); },
     async eliminarCategoria(id) { T(await sb.from('categorias').delete().eq('id', id)); },
     async guardarConfig(clave, valor) { T(await sb.from('configuracion').upsert({ clave, valor, actualizado_en: new Date().toISOString() })); },
-    async crearUsuario({ usuario, password, nombre, rol }) {
+    async crearUsuario({ usuario, password, nombre, rol, sectorIds }) {
       // Cliente temporal: el alta no cierra la sesión del administrador
       const tmp = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, {
         auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, storageKey: 'sp-alta-tmp' }
@@ -220,7 +243,7 @@ function createAPI(sb) {
       const data = T(await tmp.auth.signUp({ email: email(usuario), password, options: { data: { usuario, nombre_completo: nombre } } }));
       if (!data.user || (data.user.identities && data.user.identities.length === 0)) throw new Error('Ese nombre de usuario ya existe.');
       try { await tmp.auth.signOut(); } catch (e) { /* ignorar */ }
-      return T(await sb.rpc('admin_guardar_usuario', { p_id: data.user.id, p_nombre: nombre, p_rol: rol, p_activo: true }));
+      return guardarUsuario({ p_id: data.user.id, p_nombre: nombre, p_rol: rol, p_activo: true, p_sector_ids: sectorIds || [] });
     },
     async cambiarMiPassword(p) { T(await sb.auth.updateUser({ password: p })); },
     subscribe(h) {
@@ -268,6 +291,8 @@ async function enter(user) {
     return renderLogin(perfil ? 'Tu usuario está desactivado o pendiente de activación. Consulta con un administrador.' : 'No se encontró el perfil de este usuario.');
   }
   S.perfil = perfil;
+  recordarUsuario(perfil.usuario, perfil.nombre_completo);
+  document.onkeydown = null;
   S.f = defaultsF();
   try { await loadAll(); } catch (e) { return renderLogin('No se pudieron cargar los datos: ' + errMsg(e)); }
   renderShell();
@@ -330,32 +355,8 @@ async function renderLogin(msg) {
     <div class="login-form"><div class="login-card" id="lc"></div></div>
   </div>`;
   const lc = $('#lc');
-  if (hay) {
-    lc.innerHTML = `
-      <h1>Iniciar sesión</h1>
-      <p>Ingresa con el usuario y la contraseña que te dio el administrador.</p>
-      <form id="lf" class="stack" autocomplete="on">
-        <div class="form-err ${msg ? 'show' : ''}" id="le">${esc(msg || '')}</div>
-        <div class="field"><label for="lu">Usuario</label>
-          <div class="in-ic">${ic('user-round')}<input class="in" id="lu" autocomplete="username" autocapitalize="none" spellcheck="false" required></div></div>
-        <div class="field"><label for="lp">Contraseña</label>
-          <div class="in-ic rel">${ic('lock')}<input class="in" id="lp" type="password" autocomplete="current-password" required style="padding-right:46px">
-          <button type="button" class="btn ghost sm icon" id="eye" aria-label="Mostrar contraseña" style="position:absolute;right:5px;top:5px">${ic('eye', 's')}</button></div></div>
-        <button class="btn pri lg" id="lb">Ingresar</button>
-      </form>`;
-    icons();
-    $('#eye').onclick = () => { const i = $('#lp'); i.type = i.type === 'password' ? 'text' : 'password'; };
-    $('#lf').onsubmit = async e => {
-      e.preventDefault();
-      const u = $('#lu').value.trim(), p = $('#lp').value;
-      if (!u || !p) return showErr($('#le'), 'Completa usuario y contraseña.');
-      await busy($('#lb'), async () => {
-        try { const s = await API.signIn(u, p); await enter(s.user); }
-        catch (err) { showErr($('#le'), errMsg(err)); }
-      });
-    };
-    setTimeout(() => $('#lu') && $('#lu').focus(), 50);
-  } else {
+  if (hay) loginPin(lc, msg);
+  else {
     lc.innerHTML = `
       <h1>Crear el administrador</h1>
       <p>Todavía no hay usuarios. La primera cuenta que crees será la del administrador de ${sucursal}.</p>
@@ -365,34 +366,119 @@ async function renderLogin(msg) {
         <div class="field"><label for="su">Usuario</label><input class="in" id="su" autocapitalize="none" spellcheck="false" required>
           <span class="hint">Solo letras minúsculas, números, punto, guion o guion bajo.</span></div>
         <div class="grid2">
-          <div class="field"><label for="sp">Contraseña</label><input class="in" id="sp" type="password" autocomplete="new-password" required></div>
-          <div class="field"><label for="sp2">Repetir contraseña</label><input class="in" id="sp2" type="password" autocomplete="new-password" required></div>
+          <div class="field"><label for="sp">PIN (4 a 6 números)</label><input class="in pin-in" id="sp" type="password" inputmode="numeric" maxlength="6" autocomplete="new-password" required></div>
+          <div class="field"><label for="sp2">Repetir PIN</label><input class="in pin-in" id="sp2" type="password" inputmode="numeric" maxlength="6" autocomplete="new-password" required></div>
         </div>
+        <span class="hint muted small">Para el administrador conviene un PIN de 6 números.</span>
         <button class="btn pri lg" id="sb">Crear administrador</button>
       </form>`;
     icons();
     $('#sf').onsubmit = async e => {
       e.preventDefault();
-      const n = $('#sn').value.trim(), u = $('#su').value.trim().toLowerCase(), p = $('#sp').value, p2 = $('#sp2').value;
+      const n = $('#sn').value.trim(), u = $('#su').value.trim().toLowerCase(), p = $('#sp').value.trim(), p2 = $('#sp2').value.trim();
       const v = validarUsuario(n, u, p, p2);
       if (v) return showErr($('#se'), v);
       await busy($('#sb'), async () => {
         try {
-          const r = await API.signUpFirst(u, p, n);
+          const r = await API.signUpFirst(u, pinPass(p), n);
+          recordarUsuario(u, n);
           if (r.session) await enter(r.user);
-          else showErr($('#se'), 'La cuenta se creó, pero Supabase pide confirmar el email. Desactiva "Confirm email" en Authentication › Providers › Email (ver README) e inicia sesión.');
+          else showErr($('#se'), 'La cuenta se creó, pero Supabase pide confirmar el email. Desactiva "Confirm email" en Authentication › Sign In / Providers › Email (ver README) e inicia sesión.');
         } catch (err) { showErr($('#se'), errMsg(err)); }
       });
     };
   }
 }
 
-function validarUsuario(nombre, usuario, pass, pass2, conPass = true) {
+/* ---------- ingreso con PIN ---------- */
+const pinPass = pin => `sp-${pin}`;               // Supabase pide mínimo 6 caracteres: el PIN se guarda con prefijo
+const esPin = v => /^\d{4,6}$/.test(v);
+function recordarUsuario(usuario, nombre) { try { localStorage.setItem('sp_ultimo', JSON.stringify({ usuario, nombre })); } catch (e) { /* ignorar */ } }
+function usuarioRecordado() { try { return JSON.parse(localStorage.getItem('sp_ultimo') || 'null'); } catch (e) { return null; } }
+async function ingresar(usuario, secreto) {
+  if (esPin(secreto)) {
+    try { return await API.signIn(usuario, pinPass(secreto)); }
+    catch (e) { if (secreto.length < 6 || !/Invalid login/i.test(e.message || '')) throw e; }
+  }
+  return API.signIn(usuario, secreto);               // cuentas con contraseña común
+}
+function loginPin(lc, msg) {
+  const rec = usuarioRecordado();
+  let pin = '', modoPass = false, usuario = rec ? rec.usuario : '';
+  const render = () => {
+    lc.innerHTML = `
+      ${rec && usuario === rec.usuario
+        ? `<div class="hola"><span class="avatar" style="width:52px;height:52px;font-size:18px">${esc(iniciales(rec.nombre))}</span><div><h1>Hola, ${esc((rec.nombre || '').split(' ')[0])}</h1><p class="muted" style="margin:0">${modoPass ? 'Ingresa tu contraseña' : 'Ingresa tu PIN'}</p></div></div>`
+        : `<h1>Ingresar</h1><p>Escribe tu usuario y tu PIN.</p>
+           <div class="field" style="margin-bottom:14px"><label for="lu">Usuario</label>
+           <div class="in-ic">${ic('user-round')}<input class="in" id="lu" value="${esc(usuario)}" autocomplete="username" autocapitalize="none" spellcheck="false"></div></div>`}
+      <div class="form-err ${msg ? 'show' : ''}" id="le" style="margin-bottom:12px">${esc(msg || '')}</div>
+      ${modoPass
+        ? `<form id="lf" class="stack"><div class="field"><label for="lp">Contraseña</label><input class="in" id="lp" type="password" autocomplete="current-password"></div><button class="btn pri lg" id="lb">Ingresar</button></form>`
+        : `<div class="pin-dots" aria-label="PIN">${Array.from({ length: Math.max(4, pin.length) }, (_, i) => `<i class="${i < pin.length ? 'on' : ''}"></i>`).join('')}</div>
+           <div class="keypad">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button type="button" data-k="${n}">${n}</button>`).join('')}
+             <button type="button" data-k="del" aria-label="Borrar">${ic('delete')}</button><button type="button" data-k="0">0</button>
+             <button type="button" class="ok" data-k="ok" id="lb" aria-label="Entrar">${ic('arrow-right')}</button></div>`}
+      <div class="login-links">
+        ${rec && usuario === rec.usuario ? `<button type="button" class="btn ghost sm" id="otro">No soy ${esc((rec.nombre || '').split(' ')[0])}</button>` : ''}
+        <button type="button" class="btn ghost sm" id="modo">${modoPass ? 'Usar PIN' : 'Usar contraseña'}</button>
+      </div>`;
+    icons();
+    const lu = $('#lu');
+    if (lu) { lu.oninput = () => { usuario = lu.value.trim().toLowerCase(); }; if (!usuario) setTimeout(() => lu.focus(), 50); }
+    $('#modo').onclick = () => { modoPass = !modoPass; pin = ''; msg = ''; render(); };
+    if ($('#otro')) $('#otro').onclick = () => { usuario = ''; pin = ''; msg = ''; try { localStorage.removeItem('sp_ultimo'); } catch (e) { /* ignorar */ } location.reload(); };
+    if (modoPass) {
+      $('#lf').onsubmit = e => { e.preventDefault(); entrar($('#lp').value); };
+      setTimeout(() => (usuario ? $('#lp') : $('#lu')).focus(), 50);
+    } else {
+      lc.querySelector('.keypad').onclick = e => {
+        const b = e.target.closest('[data-k]'); if (!b) return;
+        const k = b.dataset.k;
+        if (k === 'del') pin = pin.slice(0, -1);
+        else if (k === 'ok') return entrar(pin);
+        else if (pin.length < 6) pin += k;
+        msg = ''; paintDots();
+      };
+    }
+  };
+  const paintDots = () => {
+    const d = lc.querySelector('.pin-dots'); if (!d) return;
+    d.innerHTML = Array.from({ length: Math.max(4, pin.length) }, (_, i) => `<i class="${i < pin.length ? 'on' : ''}"></i>`).join('');
+    showErr($('#le'), msg || '');
+  };
+  const entrar = async secreto => {
+    usuario = (usuario || '').trim().toLowerCase();
+    if (!usuario) return showErr($('#le'), 'Escribe tu usuario.');
+    if (!secreto) return showErr($('#le'), modoPass ? 'Escribe tu contraseña.' : 'Escribe tu PIN.');
+    if (!modoPass && secreto.length < 4) return showErr($('#le'), 'El PIN tiene al menos 4 números.');
+    await busy($('#lb'), async () => {
+      try {
+        const s = await ingresar(usuario, secreto);
+        await enter(s.user);
+      } catch (err) {
+        pin = ''; msg = /Invalid login/i.test(err.message || '') ? (modoPass ? 'Usuario o contraseña incorrectos.' : 'Usuario o PIN incorrectos.') : errMsg(err);
+        if (modoPass) showErr($('#le'), msg); else paintDots();
+      }
+    });
+  };
+  // teclado físico
+  document.onkeydown = e => {
+    if (!lc.isConnected) { document.onkeydown = null; return; }
+    if (modoPass || (document.activeElement && document.activeElement.id === 'lu')) { if (e.key === 'Enter' && !modoPass && pin) entrar(pin); return; }
+    if (/^\d$/.test(e.key) && pin.length < 6) { pin += e.key; msg = ''; paintDots(); }
+    else if (e.key === 'Backspace') { pin = pin.slice(0, -1); paintDots(); }
+    else if (e.key === 'Enter') entrar(pin);
+  };
+  render();
+}
+
+function validarUsuario(nombre, usuario, pin, pin2, conPin = true) {
   if (!nombre) return 'Completa el nombre completo.';
   if (!/^[a-z0-9._-]{3,30}$/.test(usuario)) return 'El usuario debe tener entre 3 y 30 caracteres: letras minúsculas, números, punto, guion o guion bajo (sin espacios ni tildes).';
-  if (conPass) {
-    if ((pass || '').length < 6) return 'La contraseña debe tener al menos 6 caracteres.';
-    if (pass !== pass2) return 'Las contraseñas no coinciden.';
+  if (conPin) {
+    if (!esPin(pin || '')) return 'El PIN debe tener entre 4 y 6 números.';
+    if (pin !== pin2) return 'Los PIN no coinciden.';
   }
   return '';
 }
@@ -430,11 +516,11 @@ function renderShell() {
       <main class="content" id="view"></main>
     </div>
   </div>`;
-  $('#nav').innerHTML = NAV.filter(n => n.sep || !n.admin || isAdmin()).map(n => n.sep
+  $('#nav').innerHTML = NAV.filter(n => n.sep || n.roles.includes(rolActual())).map(n => n.sep
     ? `<div class="nav-sep">${n.sep}</div>`
     : `<a href="#/${n.id}" data-nav="${n.id}">${ic(n.i)}<span>${n.t}</span>${n.id === 'stock' ? '<span class="cnt hide" id="nav-cnt"></span>' : ''}</a>`).join('');
   $('#me').innerHTML = `<span class="avatar">${esc(iniciales(S.perfil.nombre_completo))}</span>
-    <span style="min-width:0"><span class="me-n" style="display:block">${esc(S.perfil.nombre_completo)}</span><span class="me-r">${isAdmin() ? 'Administrador' : 'Usuario'}</span></span>
+    <span style="min-width:0"><span class="me-n" style="display:block">${esc(S.perfil.nombre_completo)}</span><span class="me-r">${(ROLES[rolActual()] || {}).t || ''}</span></span>
     ${ic('chevrons-up-down', 's')}`;
   $('#burger').onclick = () => $('#layout').classList.add('nav-open');
   $('#scrim').onclick = closeNav;
@@ -492,7 +578,7 @@ function toggleUserMenu() {
   m.className = 'menu'; m.id = 'umenu'; m.setAttribute('role', 'menu');
   m.style.cssText = 'top:auto;bottom:calc(100% + 6px);left:0;right:0';
   m.innerHTML = `
-    <button data-go="perfil">${ic('circle-user-round')}Mi perfil</button>
+    ${isJefe() ? '' : `<button data-go="perfil">${ic('circle-user-round')}Mi perfil</button>`}
     <button data-go="configuracion">${ic('settings')}Configuración</button>
     <button id="lo">${ic('log-out')}Cerrar sesión</button>`;
   $('.side-foot').append(m); icons();
@@ -513,11 +599,11 @@ function go(view, params) {
 window.addEventListener('hashchange', () => { if (S.perfil) route(); });
 
 function route() {
-  const raw = location.hash.replace(/^#\/?/, '') || (isAdmin() ? 'dashboard' : 'rapido');
+  const raw = location.hash.replace(/^#\/?/, '') || inicioDe(rolActual());
   const [path, qs] = raw.split('?');
-  let id = VIEWS[path] ? path : 'dashboard';
+  let id = VIEWS[path] ? path : inicioDe(rolActual());
   const nav = NAV.find(n => n.id === id);
-  if (nav && nav.admin && !isAdmin()) id = 'dashboard';
+  if (!nav || !nav.roles.includes(rolActual())) id = inicioDe(rolActual());
   S.view = id;
   S.params = Object.fromEntries(new URLSearchParams(qs || ''));
   destroyCharts();
@@ -656,7 +742,7 @@ const optPremios = (sel, soloActivos) => S.premios.filter(p => !soloActivos || p
   .map(p => `<option value="${p.id}" ${String(sel) === String(p.id) ? 'selected' : ''}>${esc(p.nombre)}${p.activo ? '' : ' (desactivado)'}</option>`).join('');
 const optUsuarios = sel => S.perfiles.slice().sort((a, b) => a.nombre_completo.localeCompare(b.nombre_completo, 'es'))
   .map(u => `<option value="${u.id}" ${sel === u.id ? 'selected' : ''}>${esc(u.nombre_completo)}</option>`).join('');
-const emptyRow = (cols, t, s, i = 'inbox') => `<tr><td colspan="${cols}"><div class="empty">${ic(i)}<b>${t}</b>${s || ''}</div></td></tr>`;
+const emptyRow = (cols, t, s, i = 'inbox') => `<tr><td colspan="${cols}" class="keep"><div class="empty">${ic(i)}<b>${t}</b>${s || ''}</div></td></tr>`;
 
 /* =============================================================
    EXPORTACIÓN (Excel, CSV, PDF)
@@ -915,7 +1001,7 @@ VIEWS.stock = {
             <span class="muted small" id="s-cnt"></span>
           </div>
         </div>
-        <div class="tbl-wrap"><table class="rt cards">
+        <div class="tbl-wrap"><table class="rt resp">
           <thead><tr><th>Premio</th><th>Categoría</th><th class="n">Stock actual</th><th class="n">Stock mínimo</th><th>Estado</th><th>Último movimiento</th><th class="n">Acciones</th></tr></thead>
           <tbody id="s-tb"></tbody>
         </table></div>
@@ -931,7 +1017,10 @@ VIEWS.stock = {
       const b = e.target.closest('[data-act]'); if (!b) return;
       const id = +b.dataset.id, p = premio(id);
       switch (b.dataset.act) {
-        case 'retirar': go('movimiento', { premio: id, tipo: 'salida' }); break;
+        case 'retirar':
+          if (isAdmin()) go('movimiento', { premio: id, tipo: 'salida' });
+          else { S.rap.cart[id] = Math.min((S.rap.cart[id] || 0) + 1, p.stock_actual); go('rapido'); }
+          break;
         case 'ingresar': go('movimiento', { premio: id, tipo: 'ingreso' }); break;
         case 'quien': modalQuien(id); break;
         case 'hist': go('historial', { premio: id }); break;
@@ -970,7 +1059,13 @@ VIEWS.stock = {
         S.premios.length ? 'Prueba con otra búsqueda o categoría.' : (admin ? 'Crea el primero con el botón "Nuevo premio".' : 'Un administrador debe cargarlos.'), 'gift');
       return;
     }
-    tb.innerHTML = rows.map(p => `
+    tb.innerHTML = rows.map(p => {
+      const acts = `${p.activo && p.stock_actual > 0 && puedeRetirar() ? `<button class="btn go" data-act="retirar" data-id="${p.id}" title="Registrar un retiro">Retirar</button>` : ''}
+          ${admin ? `
+            ${p.activo ? `<button class="btn" data-act="ingresar" data-id="${p.id}" title="Registrar ingreso" aria-label="Registrar ingreso">${ic('package-plus', 's')}</button>` : ''}
+            <button class="btn" data-act="quien" data-id="${p.id}" title="¿Quién lo sacó?" aria-label="¿Quién lo sacó?">${ic('user-search', 's')}</button>
+            <button class="btn" data-act="mas" data-id="${p.id}" title="Más opciones" aria-label="Más opciones" aria-haspopup="menu">${ic('ellipsis-vertical', 's')}</button>` : ''}`;
+      return `
       <tr class="${p.activo ? '' : 'void'}">
         <td class="main-cell" data-label="Premio"><div class="pcell">${thumb(p)}<div style="min-width:0"><div class="pname">${esc(p.nombre)}</div><div class="pcode">${esc(p.codigo)}</div></div></div></td>
         <td data-label="Categoría">${esc(catName(p.categoria_id))}</td>
@@ -978,14 +1073,11 @@ VIEWS.stock = {
         <td data-label="Stock mínimo" class="n num">${fNum(p.stock_minimo)}</td>
         <td data-label="Estado">${badgeEstado(p)}</td>
         <td data-label="Último movimiento"><span class="muted">${p.ultimo_movimiento_en ? rel(p.ultimo_movimiento_en) : 'Sin movimientos'}</span></td>
-        <td data-label="" class="n"><div class="acts">
-          ${p.activo && p.stock_actual > 0 ? `<button class="btn go" data-act="retirar" data-id="${p.id}" title="Registrar un retiro">Retirar</button>` : ''}
-          ${admin ? `
-            ${p.activo ? `<button class="btn" data-act="ingresar" data-id="${p.id}" title="Registrar ingreso" aria-label="Registrar ingreso">${ic('package-plus', 's')}</button>` : ''}
-            <button class="btn" data-act="quien" data-id="${p.id}" title="¿Quién lo sacó?" aria-label="¿Quién lo sacó?">${ic('user-search', 's')}</button>
-            <button class="btn" data-act="mas" data-id="${p.id}" title="Más opciones" aria-label="Más opciones" aria-haspopup="menu">${ic('ellipsis-vertical', 's')}</button>` : ''}
-        </div></td>
-      </tr>`).join('');
+        <td data-label="" class="n"><div class="acts">${acts}</div></td>
+        <td class="mob"><div class="mrow">${thumb(p)}<div class="grow"><div class="t1">${esc(p.nombre)}</div><div class="t2">${esc(catName(p.categoria_id))}</div><div style="margin-top:6px">${badgeEstado(p)}</div></div>
+          <div class="mr"><span class="big">${stockSpan(p)}</span><span class="t2">mínimo ${fNum(p.stock_minimo)}</span></div></div>
+          ${acts.trim() ? `<div class="acts" style="margin-top:6px">${acts}</div>` : ''}</td>
+      </tr>`; }).join('');
   }
 };
 
@@ -1325,7 +1417,9 @@ VIEWS.rapido = {
   mount(el) {
     const R = S.rap;
     if (R.sector == null) { try { R.sector = Number(localStorage.getItem(lsSector())) || null; } catch (e) { /* ignorar */ } }
-    if (R.sector && !(sectorDe(R.sector) || {}).activo) R.sector = null;
+    const permitidos = sectoresRetiro();
+    if (R.sector && !permitidos.some(x => x.id === R.sector)) R.sector = null;
+    if (!R.sector && permitidos.length === 1) R.sector = permitidos[0].id;
     document.body.classList.add('has-bar');
     this.ord = null;
     el.innerHTML = `
@@ -1373,7 +1467,7 @@ VIEWS.rapido = {
     this.paintSec(); this.paintGrid(); this.paintBar();
   },
   paintSec() {
-    const R = S.rap, secs = sectoresActivos();
+    const R = S.rap, secs = sectoresRetiro();
     if (!S.sectores.length) {
       $('#rp-sec').innerHTML = `<div class="callout warn">${ic('triangle-alert', 's')}<span>Faltan los sectores en la base de datos. ${isAdmin() ? 'Ejecuta el archivo <b>migracion_02_retiro_rapido.sql</b> en Supabase (ver README).' : 'Avisa a un administrador.'}</span></div>`;
       return;
@@ -1383,6 +1477,7 @@ VIEWS.rapido = {
         <div class="sec-grid">${secs.map(x => `<button class="sec-big" data-sec="${x.id}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>`;
       return;
     }
+    if (secs.length === 1) { $('#rp-sec').innerHTML = `<div class="sec-fijo">${ic('map-pin', 's')}Retiras para <b>${esc(sectorLabel(secs[0]))}</b></div>`; return; }
     $('#rp-sec').innerHTML = `<div class="sec-row" role="radiogroup" aria-label="Sector">${secs.map(x => `
       <button class="sec-chip ${x.id === R.sector ? 'on' : ''}" data-sec="${x.id}" role="radio" aria-checked="${x.id === R.sector}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>`;
   },
@@ -1472,6 +1567,98 @@ VIEWS.rapido = {
 };
 
 /* =============================================================
+   VISTA: CONSUMO POR SECTOR (jefes de sector: solo consulta)
+   ============================================================= */
+function rangoPer(k) {
+  const h = ymd(new Date());
+  if (k === 'hoy') return [h, h];
+  if (k === 'semana') return [ymd(lunes(new Date())), h];
+  if (k === 'mes') return [h.slice(0, 8) + '01', h];
+  if (k === 'mesant') return rangoRapido('mesant');
+  return ['', ''];
+}
+VIEWS.consumo = {
+  title: () => 'Consumo',
+  mount(el) {
+    const f = S.f.cons, secs = sectoresConsulta();
+    if (f.sector && !secs.some(x => String(x.id) === String(f.sector))) f.sector = '';
+    if (secs.length === 1) f.sector = String(secs[0].id);
+    el.innerHTML = `
+      ${!S.sectores.length ? `<div class="callout warn">${ic('triangle-alert', 's')}<span>Todavía no hay sectores configurados.</span></div>` : ''}
+      ${secs.length > 1 ? `<div class="sec-row" id="cs-sec">
+          <button class="sec-chip" data-s="">Todos</button>
+          ${secs.map(x => `<button class="sec-chip" data-s="${x.id}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>`
+        : secs.length === 1 ? `<div class="sec-fijo">${ic('map-pin', 's')}Sector <b>${esc(sectorLabel(secs[0]))}</b></div>` : ''}
+      <div class="chips" id="cs-per" style="margin-bottom:14px">
+        <button class="chip" data-p="hoy">Hoy</button><button class="chip" data-p="semana">Esta semana</button>
+        <button class="chip" data-p="mes">Este mes</button><button class="chip" data-p="mesant">Mes anterior</button>
+      </div>
+      <div class="kpis k3" id="cs-k"></div>
+      <div class="cols-2e">
+        <div class="panel"><div class="panel-h"><h2>Qué se retiró</h2><span class="sub">Unidades por premio</span></div><div class="panel-b flush" id="cs-top"></div></div>
+        <div class="panel"><div class="panel-h"><h2>Quién retiró</h2><span class="sub">Unidades por persona</span></div><div class="panel-b flush" id="cs-users"></div></div>
+      </div>
+      <div class="panel mt"><div class="panel-h"><h2>Detalle de retiros</h2><span class="sp"></span>${expBtns('cons')}</div>
+        <div class="panel-b flush"><ul class="list" id="cs-list"></ul></div><div class="pager" id="cs-more"></div></div>`;
+    el.onclick = e => {
+      const s = e.target.closest('[data-s]'); if (s) { f.sector = s.dataset.s; f.n = 30; this.paint(); icons(); return; }
+      const p = e.target.closest('[data-p]'); if (p) { f.per = p.dataset.p; f.n = 30; this.paint(); icons(); return; }
+      if (e.target.closest('#cs-mas')) { f.n += 30; this.paint(); icons(); }
+    };
+    bindExp(el, 'cons', () => {
+      const etiqueta = f.sector ? sectorLabel(sectorDe(f.sector)) : 'todos los sectores';
+      const perTxt = { hoy: 'hoy', semana: 'esta semana', mes: 'este mes', mesant: 'mes anterior' }[f.per];
+      return { base: 'consumo_sector', title: `Retiros de ${etiqueta} (${perTxt})`, rows: this.rows(), cols: [
+        { h: 'Fecha', v: m => fFecha(m.creado_en) }, { h: 'Hora', v: m => fHora(m.creado_en) }, { h: 'Sector', v: m => m.sector_nombre || '' },
+        { h: 'Usuario', v: m => m.usuario_nombre }, { h: 'Premio', v: m => pNombre(m) }, { h: 'Cantidad', v: m => qtyEf(m) },
+        { h: 'Estado', v: estadoMovTxt }, { h: 'Observación', v: m => m.observacion || '' }] };
+    });
+    this.paint();
+  },
+  rows() {
+    const f = S.f.cons, [d, h] = rangoPer(f.per);
+    const ok = new Set(sectoresConsulta().map(x => x.id));
+    return S.movs.filter(m => m.tipo === 'salida' && m.sector_id && ok.has(m.sector_id) &&
+      (!f.sector || String(m.sector_id) === String(f.sector)) && inRange(m, d, h));
+  },
+  paint() {
+    if (!$('#cs-k')) return;
+    const f = S.f.cons;
+    $$('#cs-sec [data-s]').forEach(b => b.classList.toggle('on', b.dataset.s === String(f.sector)));
+    $$('#cs-per [data-p]').forEach(b => b.classList.toggle('on', b.dataset.p === f.per));
+    const rows = this.rows(), vig = rows.filter(m => m.estado !== 'anulado');
+    const tot = sum(vig, qtyEf);
+    $('#cs-k').innerHTML = `
+      <div class="kpi"><span class="kpi-l">${ic('package-minus', 's')}Unidades</span><span class="kpi-v">${fNum(tot)}</span><span class="kpi-s">retiradas</span></div>
+      <div class="kpi"><span class="kpi-l">${ic('zap', 's')}Retiros</span><span class="kpi-v">${fNum(new Set(vig.map(m => m.usuario_id + '|' + m.creado_en.slice(0, 16))).size)}</span><span class="kpi-s">registrados</span></div>
+      <div class="kpi"><span class="kpi-l">${ic('users', 's')}Personas</span><span class="kpi-v">${fNum(new Set(vig.map(m => m.usuario_id)).size)}</span><span class="kpi-s">retiraron</span></div>`;
+    const barras = (map, box, vacio) => {
+      const arr = Object.entries(map).sort((a, b) => b[1] - a[1]);
+      const max = arr.length ? arr[0][1] : 1;
+      $(box).innerHTML = arr.length ? arr.map(([k, n]) => `<div class="hbar"><span class="nm">${esc(k)}</span><span class="tr"><i style="width:${(n / max * 100).toFixed(1)}%"></i></span><span class="num strong">${fNum(n)}</span></div>`).join('')
+        : `<div class="empty">${ic('inbox')}<b>${vacio}</b></div>`;
+    };
+    const pp = {}, pu = {};
+    vig.forEach(m => { const k = pNombre(m); pp[k] = (pp[k] || 0) + qtyEf(m); pu[m.usuario_nombre] = (pu[m.usuario_nombre] || 0) + qtyEf(m); });
+    barras(pp, '#cs-top', 'Sin retiros en este período');
+    barras(pu, '#cs-users', 'Nadie retiró en este período');
+    const vis = rows.slice(0, f.n);
+    let dia = '';
+    $('#cs-list').innerHTML = vis.length ? vis.map(m => {
+      const d = ymd(m.creado_en);
+      const cab = d !== dia ? `<li class="dia">${new Date(m.creado_en).toLocaleDateString('es-AR', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' })}</li>` : '';
+      dia = d;
+      return `${cab}<li class="${m.estado === 'anulado' ? 'void' : ''}"><span class="hora">${fHora(m.creado_en)}</span>
+        <div class="grow"><div class="t1"><b>${esc(m.usuario_nombre)}</b> retiró ${fNum(qtyEf(m))} ${esc(pNombre(m))}</div>
+        <div class="t2">${fFecha(m.creado_en)} ${fHora(m.creado_en)} · ${esc(m.sector_nombre || '')}${m.estado === 'anulado' ? ' · anulado' : m.estado === 'corregido' ? ` · corregido (antes ${m.cantidad})` : ''}${m.observacion ? ` · ${esc(trunc(m.observacion, 50))}` : ''}</div></div>
+        <span class="v diff-neg">${m.estado === 'anulado' ? '0' : '−' + fNum(qtyEf(m))}</span></li>`;
+    }).join('')
+      : `<li><div class="empty" style="width:100%">${ic('inbox')}<b>No hubo retiros en este período</b>Prueba con otro período o sector.</div></li>`;
+    $('#cs-more').innerHTML = rows.length > f.n ? `<span>${vis.length} de ${fNum(rows.length)}</span><span class="sp"></span><button class="btn sm" id="cs-mas">Ver más</button>` : `<span>${fNum(rows.length)} retiro(s)</span>`;
+  }
+};
+
+/* =============================================================
    VISTA: HISTORIAL
    ============================================================= */
 const PAGE = 50;
@@ -1522,7 +1709,7 @@ VIEWS.historial = {
             <span class="sp"></span>${expBtns('hist')}
           </div>
         </div>
-        <div class="tbl-wrap"><table class="rt cards">
+        <div class="tbl-wrap"><table class="rt resp">
           <thead><tr><th>Fecha</th><th>Hora</th><th>Usuario</th><th>Sector</th><th>Tipo</th><th>Premio</th><th class="n">Cantidad</th><th class="n">Stock anterior</th><th class="n">Stock actual</th><th>Observación</th><th class="n">Acciones</th></tr></thead>
           <tbody id="h-tb"></tbody>
         </table></div>
@@ -1573,11 +1760,8 @@ VIEWS.historial = {
         <td data-label="Stock anterior" class="n num">${fNum(m.stock_anterior)}</td>
         <td data-label="Stock actual" class="n num strong">${fNum(m.stock_nuevo)}</td>
         <td data-label="Observación" style="max-width:280px"><span class="muted">${esc(m.observacion || '—')}</span></td>
-        <td data-label="" class="n"><div class="acts">
-          <button class="btn" data-act="ver" data-id="${m.id}" title="Ver detalle" aria-label="Ver detalle">${ic('eye', 's')}</button>
-          ${['ingreso', 'salida'].includes(m.tipo) && m.estado !== 'anulado' ? `<button class="btn" data-act="corregir" data-id="${m.id}" title="Corregir cantidad" aria-label="Corregir cantidad">${ic('pencil-line', 's')}</button>` : ''}
-          ${['ingreso', 'salida', 'ajuste'].includes(m.tipo) && m.estado !== 'anulado' ? `<button class="btn" data-act="anular" data-id="${m.id}" title="Anular" aria-label="Anular">${ic('ban', 's')}</button>` : ''}
-        </div></td>
+        <td data-label="" class="n"><div class="acts">${histActs(m)}</div></td>
+        ${mobMov(m, histActs(m))}
       </tr>`).join('') : emptyRow(11, 'No hay movimientos con estos filtros', 'Prueba ampliando el rango de fechas o limpiando los filtros.', 'history');
     $('#h-pg').innerHTML = `<span>${rows.length ? `Mostrando ${f.page * PAGE + 1}–${f.page * PAGE + vis.length} de ${fNum(rows.length)} movimientos` : 'Sin resultados'}</span><span class="sp"></span>
       <button class="btn sm" data-pg="-1" ${f.page === 0 ? 'disabled' : ''}>${ic('chevron-left', 's')}Anterior</button>
@@ -1586,6 +1770,23 @@ VIEWS.historial = {
   }
 };
 
+function histActs(m) {
+  return `<button class="btn" data-act="ver" data-id="${m.id}" title="Ver detalle" aria-label="Ver detalle">${ic('eye', 's')}</button>
+    ${['ingreso', 'salida'].includes(m.tipo) && m.estado !== 'anulado' ? `<button class="btn" data-act="corregir" data-id="${m.id}" title="Corregir cantidad" aria-label="Corregir cantidad">${ic('pencil-line', 's')}</button>` : ''}
+    ${['ingreso', 'salida', 'ajuste'].includes(m.tipo) && m.estado !== 'anulado' ? `<button class="btn" data-act="anular" data-id="${m.id}" title="Anular" aria-label="Anular">${ic('ban', 's')}</button>` : ''}`;
+}
+// fila compacta para celular (historial, perfil)
+function mobMov(m, acts) {
+  return `<td class="mob"><div class="mrow ${m.estado === 'anulado' ? 'void' : ''}">
+    <span class="mv-ic t-${m.tipo}">${ic(TIPOS[m.tipo].i, 's')}</span>
+    <div class="grow"><div class="t1">${esc(pNombre(m))}</div>
+      <div class="t2">${esc(m.usuario_nombre)}${m.sector_nombre ? ` · ${esc(m.sector_nombre)}` : ''}</div>
+      <div class="t2">${fFecha(m.creado_en)} ${fHora(m.creado_en)} · stock ${fNum(m.stock_anterior)} → ${fNum(m.stock_nuevo)}</div>
+      ${m.observacion ? `<div class="t3">${esc(m.observacion)}</div>` : ''}</div>
+    <div class="mr"><span class="big ${m.delta > 0 ? 'diff-pos' : 'diff-neg'}">${signo(m.delta)}</span>
+      ${m.estado === 'anulado' ? '<span class="badge mute">Anulado</span>' : m.estado === 'corregido' ? `<span class="badge t-correccion">Corregido a ${m.cantidad_corregida}</span>` : `<span class="t2">${TIPOS[m.tipo].t}</span>`}</div></div>
+    ${acts ? `<div class="acts" style="margin-top:4px">${acts}</div>` : ''}</td>`;
+}
 function modalDetalleMov(m) {
   const ref = m.movimiento_ref ? S.movs.find(x => x.id === m.movimiento_ref) : null;
   const hijos = S.movs.filter(x => x.movimiento_ref === m.id);
@@ -1712,8 +1913,8 @@ VIEWS.inventario = {
           <button class="btn sm ghost icon" data-igual="${p.id}" title="Coincide con el sistema" aria-label="Coincide con el sistema">${ic('equal', 's')}</button>
           <input class="in inv-in" type="number" min="0" step="1" inputmode="numeric" data-fis="${p.id}" value="${c.fisico ?? ''}" aria-label="Stock físico de ${esc(p.nombre)}"></div></td>
         <td data-label="Diferencia" class="n" data-dif="${p.id}"></td>
-        <td data-label="Motivo"><input class="in" data-mot="${p.id}" value="${esc(c.motivo || '')}" placeholder="Solo si hay diferencia"></td>
-        <td data-label="Ajustar"><label class="check"><input type="checkbox" data-aj="${p.id}" ${c.ajustar === false ? '' : 'checked'}>Ajustar stock</label></td>
+        <td data-label="Motivo" class="inv-opt"><input class="in" data-mot="${p.id}" value="${esc(c.motivo || '')}" placeholder="Solo si hay diferencia"></td>
+        <td data-label="Ajustar" class="inv-opt"><label class="check"><input type="checkbox" data-aj="${p.id}" ${c.ajustar === false ? '' : 'checked'}>Ajustar stock</label></td>
       </tr>`;
     }).join('') : emptyRow(6, 'No hay premios activos para contar', '', 'clipboard-list');
     const get = id => (S.invCounts[id] = S.invCounts[id] || { fisico: '', motivo: '', ajustar: true });
@@ -1761,8 +1962,10 @@ VIEWS.inventario = {
   paintRow(id) {
     const cell = $(`[data-dif="${id}"]`), p = premio(id); if (!cell || !p) return;
     const c = S.invCounts[id];
-    if (!c || c.fisico === '' || c.fisico == null) { cell.innerHTML = '<span class="muted">—</span>'; return; }
+    const tr = cell.closest('tr');
+    if (!c || c.fisico === '' || c.fisico == null) { cell.innerHTML = '<span class="muted">—</span>'; tr && tr.classList.remove('hasdif'); return; }
     const d = Number(c.fisico) - p.stock_actual;
+    tr && tr.classList.toggle('hasdif', d !== 0);
     cell.innerHTML = `<span class="${d > 0 ? 'diff-pos' : d < 0 ? 'diff-neg' : 'diff-zero'}" style="font-size:16px">${d === 0 ? 'Sin diferencia' : signo(d)}</span>`;
   },
   paintSum() {
@@ -1852,7 +2055,7 @@ VIEWS.reportes = {
           <button class="btn pri" id="r-all">${ic('file-spreadsheet', 's')}Exportar todo a Excel</button>
         </div>
       </div></div>
-      <div class="kpis mt" id="r-kpis" style="grid-template-columns:repeat(4,1fr)"></div>
+      <div class="kpis k4 mt" id="r-kpis"></div>
       <div class="panel">
         <div class="panel-h"><h2>Salidas por período</h2><span class="sub">Unidades retiradas</span><span class="sp"></span>
           <div class="chips" id="r-g"><button class="chip" data-g="dia">Por día</button><button class="chip" data-g="semana">Por semana</button><button class="chip" data-g="mes">Por mes</button></div>
@@ -1992,20 +2195,33 @@ VIEWS.reportes = {
 /* =============================================================
    VISTA: USUARIOS
    ============================================================= */
+async function guardarUsuario(args) {
+  try { return await API.rpc('admin_guardar_usuario', args); }
+  catch (e) {
+    // base sin la migración 03: reintentar sin sectores
+    if ('p_sector_ids' in args && /admin_guardar_usuario|schema cache|function/i.test(e.message || '')) {
+      const { p_sector_ids, ...rest } = args;
+      if (args.p_rol === 'supervisor') throw new Error('Para crear jefes de sector ejecuta migracion_03_roles.sql en Supabase.');
+      return API.rpc('admin_guardar_usuario', rest);
+    }
+    throw e;
+  }
+}
+const nombresSectores = ids => (ids && ids.length) ? ids.map(id => (sectorDe(id) || {}).nombre).filter(Boolean).join(', ') : 'Todos los sectores';
 VIEWS.usuarios = {
   title: () => 'Usuarios',
   mount(el) {
     const f = S.f.usr;
     el.innerHTML = `
-      <div class="page-head"><p>Personas que pueden entrar al sistema. Los usuarios con historial no se eliminan: se desactivan para conservar la trazabilidad.</p><span class="sp"></span>
+      <div class="page-head"><p>Personas que pueden entrar al sistema con su usuario y PIN. Los usuarios con historial no se eliminan: se desactivan para conservar la trazabilidad.</p><span class="sp"></span>
         <button class="btn pri" id="u-new">${ic('user-plus')}Nuevo usuario</button></div>
       <div class="panel">
         <div class="panel-b" style="padding-bottom:4px"><div class="toolbar">
           <div class="in-ic">${ic('search')}<input class="in" id="u-q" placeholder="Buscar por nombre o usuario" value="${esc(f.q)}"></div>
-          <select class="in" id="u-r" aria-label="Rol"><option value="">Todos los roles</option><option value="admin">Administradores</option><option value="usuario">Usuarios</option></select>
+          <select class="in" id="u-r" aria-label="Rol"><option value="">Todos los roles</option>${Object.entries(ROLES).map(([k, v]) => `<option value="${k}">${v.t}</option>`).join('')}</select>
         </div></div>
-        <div class="tbl-wrap"><table class="rt cards">
-          <thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Estado</th><th class="n">Premios retirados</th><th>Último movimiento</th><th class="n">Acciones</th></tr></thead>
+        <div class="tbl-wrap"><table class="rt resp">
+          <thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Sectores</th><th>Estado</th><th class="n">Retirados</th><th class="n">Acciones</th></tr></thead>
           <tbody id="u-tb"></tbody></table></div>
       </div>`;
     $('#u-r').value = f.rol;
@@ -2027,62 +2243,80 @@ VIEWS.usuarios = {
     tb.innerHTML = rows.length ? rows.map(u => {
       const mv = S.movs.filter(m => m.usuario_id === u.id);
       const yo = u.id === S.perfil.id;
-      return `<tr class="${u.activo ? '' : 'void'}">
-        <td class="main-cell" data-label="Nombre"><div class="pcell"><span class="avatar">${esc(iniciales(u.nombre_completo))}</span><div><div class="pname">${esc(u.nombre_completo)}${yo ? ' <span class="tag">Tú</span>' : ''}</div><div class="pcode">Alta: ${fFecha(u.creado_en)}</div></div></div></td>
-        <td data-label="Usuario"><span class="tab">${esc(u.usuario)}</span></td>
-        <td data-label="Rol">${u.rol === 'admin' ? `<span class="badge t-correccion">${ic('shield-check')}Administrador</span>` : `<span class="badge t-salida">${ic('user-round')}Usuario</span>`}</td>
-        <td data-label="Estado">${u.activo ? '<span class="badge ok"><span class="d"></span>Activo</span>' : '<span class="badge mute"><span class="d"></span>Inactivo</span>'}</td>
-        <td data-label="Premios retirados" class="n strong num">${fNum(sum(salidasVig(mv), qtyEf))}</td>
-        <td data-label="Último movimiento" class="muted">${mv.length ? rel(mv[0].creado_en) : 'Sin movimientos'}</td>
-        <td data-label="" class="n"><div class="acts">
+      const sects = u.rol === 'admin' ? 'Todos' : nombresSectores(u.sector_ids);
+      const acts = `
           <button class="btn" data-act="ver" data-id="${u.id}" title="Ver perfil" aria-label="Ver perfil">${ic('circle-user-round', 's')}</button>
           <button class="btn" data-act="editar" data-id="${u.id}" title="Editar" aria-label="Editar">${ic('pencil', 's')}</button>
-          <button class="btn" data-act="pass" data-id="${u.id}" title="Cambiar contraseña" aria-label="Cambiar contraseña">${ic('key-round', 's')}</button>
+          <button class="btn" data-act="pass" data-id="${u.id}" title="Cambiar PIN" aria-label="Cambiar PIN">${ic('key-round', 's')}</button>
           ${yo ? '' : `<button class="btn" data-act="toggle" data-id="${u.id}" title="${u.activo ? 'Desactivar' : 'Activar'}" aria-label="${u.activo ? 'Desactivar' : 'Activar'}">${ic(u.activo ? 'user-x' : 'user-check', 's')}</button>
-          <button class="btn" data-act="borrar" data-id="${u.id}" title="Eliminar" aria-label="Eliminar">${ic('trash-2', 's')}</button>`}
-        </div></td></tr>`;
+          <button class="btn" data-act="borrar" data-id="${u.id}" title="Eliminar" aria-label="Eliminar">${ic('trash-2', 's')}</button>`}`;
+      const estado = u.activo ? '<span class="badge ok"><span class="d"></span>Activo</span>' : '<span class="badge mute"><span class="d"></span>Inactivo</span>';
+      return `<tr class="${u.activo ? '' : 'void'}">
+        <td data-label="Nombre"><div class="pcell"><span class="avatar">${esc(iniciales(u.nombre_completo))}</span><div><div class="pname">${esc(u.nombre_completo)}${yo ? ' <span class="tag">Tú</span>' : ''}</div><div class="pcode">Alta: ${fFecha(u.creado_en)}</div></div></div></td>
+        <td data-label="Usuario"><span class="tab">${esc(u.usuario)}</span></td>
+        <td data-label="Rol">${rolBadge(u.rol)}</td>
+        <td data-label="Sectores" class="muted small">${esc(sects)}</td>
+        <td data-label="Estado">${estado}</td>
+        <td data-label="Retirados" class="n strong num">${fNum(sum(salidasVig(mv), qtyEf))}</td>
+        <td data-label="" class="n"><div class="acts">${acts}</div></td>
+        <td class="mob"><div class="mrow"><span class="avatar">${esc(iniciales(u.nombre_completo))}</span><div class="grow">
+          <div class="t1">${esc(u.nombre_completo)}${yo ? ' <span class="tag">Tú</span>' : ''}</div><div class="t2">Usuario: ${esc(u.usuario)} · ${esc(sects)}</div>
+          <div class="row" style="gap:6px;margin-top:6px">${rolBadge(u.rol)}${estado}</div></div></div>
+          <div class="acts" style="margin-top:8px">${acts}</div></td></tr>`;
     }).join('') : emptyRow(7, 'No hay usuarios con estos filtros', '', 'users');
   }
 };
 function modalUsuario(u) {
   const nuevo = !u;
+  let rol = u ? u.rol : 'usuario';
+  const sel = new Set((u && u.sector_ids) || []);
   const md = modal({
-    title: nuevo ? 'Nuevo usuario' : `Editar a ${esc(u.nombre_completo)}`,
+    title: nuevo ? 'Nuevo usuario' : `Editar a ${esc(u.nombre_completo)}`, size: 'lg',
     body: `<form id="uf" class="stack">
       <div class="form-err" id="ue"></div>
-      <div class="field"><label for="un">Nombre completo *</label><input class="in" id="un" value="${esc(u ? u.nombre_completo : '')}" placeholder="Ej.: Juan Pérez"></div>
-      <div class="field"><label for="uu">Usuario ${nuevo ? '*' : ''}</label><input class="in" id="uu" value="${esc(u ? u.usuario : '')}" ${nuevo ? '' : 'disabled'} autocapitalize="none" spellcheck="false" placeholder="Ej.: jperez">
-        <span class="hint">${nuevo ? 'Con este nombre inicia sesión. Minúsculas, números, punto, guion o guion bajo.' : 'El nombre de usuario no se puede cambiar.'}</span></div>
-      ${nuevo ? `<div class="grid2"><div class="field"><label for="up">Contraseña *</label><input class="in" id="up" type="password" autocomplete="new-password"></div>
-        <div class="field"><label for="up2">Repetir contraseña *</label><input class="in" id="up2" type="password" autocomplete="new-password"></div></div>` : ''}
-      <div class="field"><span class="lbl">Rol</span>
-        <div class="types" style="grid-template-columns:1fr 1fr" id="urol">
-          <button type="button" class="type" data-rol="usuario">${ic('user-round', 'l')}<span><span class="t">Usuario</span><br><span class="s">Ve el stock y registra retiros</span></span></button>
-          <button type="button" class="type" data-rol="admin">${ic('shield-check', 'l')}<span><span class="t">Administrador</span><br><span class="s">Acceso completo</span></span></button>
-        </div></div>
+      <div class="grid2">
+        <div class="field"><label for="un">Nombre completo *</label><input class="in" id="un" value="${esc(u ? u.nombre_completo : '')}" placeholder="Ej.: Juan Pérez"></div>
+        <div class="field"><label for="uu">Usuario ${nuevo ? '*' : ''}</label><input class="in" id="uu" value="${esc(u ? u.usuario : '')}" ${nuevo ? '' : 'disabled'} autocapitalize="none" spellcheck="false" placeholder="Ej.: jperez">
+          <span class="hint">${nuevo ? 'Minúsculas, sin espacios. Con esto inicia sesión.' : 'El nombre de usuario no se puede cambiar.'}</span></div>
+      </div>
+      ${nuevo ? `<div class="grid2"><div class="field"><label for="up">PIN (4 a 6 números) *</label><input class="in pin-in" id="up" type="tel" inputmode="numeric" maxlength="6" autocomplete="off"></div>
+        <div class="field"><label for="up2">Repetir PIN *</label><input class="in pin-in" id="up2" type="tel" inputmode="numeric" maxlength="6" autocomplete="off"></div></div>` : ''}
+      <div class="field"><span class="lbl">¿Qué puede hacer?</span>
+        <div class="roles" id="urol">${Object.entries(ROLES).map(([k, v]) => `
+          <button type="button" class="type" data-rol="${k}">${ic(v.i, 'l')}<span><span class="t">${v.t}</span><br><span class="s">${v.s}</span></span></button>`).join('')}</div></div>
+      <div class="field" id="usec-w"><span class="lbl" id="usec-l"></span>
+        <div class="chips" id="usec">${sectoresActivos().map(x => `<button type="button" class="chip" data-sid="${x.id}">${esc(sectorLabel(x))}</button>`).join('') || '<span class="muted small">No hay sectores (ejecuta la migración 02).</span>'}</div>
+        <span class="hint" id="usec-h"></span></div>
       ${!nuevo && u.id !== S.perfil.id ? `<label class="check"><input type="checkbox" id="uact" ${u.activo ? 'checked' : ''}>Usuario activo (puede iniciar sesión)</label>` : ''}
     </form>`,
     foot: `<button class="btn" data-close>Cancelar</button><button class="btn pri" id="us">${nuevo ? 'Crear usuario' : 'Guardar cambios'}</button>`
   });
-  let rol = u ? u.rol : 'usuario';
-  const pr = () => $$('#urol .type', md.el).forEach(b => b.classList.toggle('on', b.dataset.rol === rol));
+  const pr = () => {
+    $$('#urol .type', md.el).forEach(b => b.classList.toggle('on', b.dataset.rol === rol));
+    $$('#usec .chip', md.el).forEach(b => b.classList.toggle('on', sel.has(+b.dataset.sid)));
+    md.$('#usec-w').classList.toggle('hide', rol === 'admin');
+    md.$('#usec-l').textContent = rol === 'supervisor' ? '¿Qué sectores puede consultar?' : '¿Para qué sectores puede retirar?';
+    md.$('#usec-h').textContent = sel.size ? (rol === 'usuario' && sel.size === 1 ? 'Con un solo sector, el retiro rápido lo elige solo.' : '') : 'Si no marcas ninguno, son todos los sectores.';
+  };
   md.$('#urol').onclick = e => { const b = e.target.closest('[data-rol]'); if (b) { rol = b.dataset.rol; pr(); } };
+  md.$('#usec').onclick = e => { const b = e.target.closest('[data-sid]'); if (!b) return; const id = +b.dataset.sid; sel.has(id) ? sel.delete(id) : sel.add(id); pr(); };
   pr();
   md.$('#uf').onsubmit = e => { e.preventDefault(); md.$('#us').click(); };
   md.$('#us').onclick = () => busy(md.$('#us'), async () => {
     const nombre = md.$('#un').value.trim();
+    const sectorIds = rol === 'admin' ? [] : [...sel];
     try {
       if (nuevo) {
-        const usuario = md.$('#uu').value.trim().toLowerCase();
-        const v = validarUsuario(nombre, usuario, md.$('#up').value, md.$('#up2').value);
+        const usuario = md.$('#uu').value.trim().toLowerCase(), pin = md.$('#up').value.trim();
+        const v = validarUsuario(nombre, usuario, pin, md.$('#up2').value.trim());
         if (v) return showErr(md.$('#ue'), v);
         if (S.perfiles.some(x => x.usuario === usuario)) return showErr(md.$('#ue'), 'Ese nombre de usuario ya existe.');
-        await API.crearUsuario({ usuario, password: md.$('#up').value, nombre, rol });
-        toast(`Usuario <b>${esc(usuario)}</b> creado. Ya puede iniciar sesión.`, 'ok');
+        await API.crearUsuario({ usuario, password: pinPass(pin), nombre, rol, sectorIds });
+        toast(`Usuario creado. Pásale estos datos a ${esc(nombre)}:<br>Usuario: <b>${esc(usuario)}</b> · PIN: <b>${esc(pin)}</b>`, 'ok', 15000);
       } else {
         if (!nombre) return showErr(md.$('#ue'), 'Completa el nombre completo.');
         const activo = md.$('#uact') ? md.$('#uact').checked : u.activo;
-        await API.rpc('admin_guardar_usuario', { p_id: u.id, p_nombre: nombre, p_rol: rol, p_activo: activo });
+        await guardarUsuario({ p_id: u.id, p_nombre: nombre, p_rol: rol, p_activo: activo, p_sector_ids: sectorIds });
         if (u.id === S.perfil.id) S.perfil.nombre_completo = nombre;
         toast('Cambios guardados.', 'ok');
       }
@@ -2093,18 +2327,18 @@ function modalUsuario(u) {
 }
 function modalPassword(u) {
   const md = modal({
-    title: `Cambiar contraseña de ${esc(u.nombre_completo)}`,
+    title: `Nuevo PIN para ${esc(u.nombre_completo)}`,
     body: `<div class="stack"><div class="form-err" id="pwe"></div>
-      <div class="field"><label for="pw1">Nueva contraseña</label><input class="in" id="pw1" type="password" autocomplete="new-password"></div>
-      <div class="field"><label for="pw2">Repetir contraseña</label><input class="in" id="pw2" type="password" autocomplete="new-password"></div>
-      <p class="muted small" style="margin:0">Comunícale la nueva contraseña a la persona. El cambio queda registrado en la auditoría.</p></div>`,
-    foot: `<button class="btn" data-close>Cancelar</button><button class="btn pri" id="pws">Cambiar contraseña</button>`
+      <div class="grid2"><div class="field"><label for="pw1">Nuevo PIN (4 a 6 números)</label><input class="in pin-in" id="pw1" type="tel" inputmode="numeric" maxlength="6" autocomplete="off"></div>
+      <div class="field"><label for="pw2">Repetir PIN</label><input class="in pin-in" id="pw2" type="tel" inputmode="numeric" maxlength="6" autocomplete="off"></div></div>
+      <p class="muted small" style="margin:0">Pásale el nuevo PIN a la persona. El cambio queda registrado en la auditoría.</p></div>`,
+    foot: `<button class="btn" data-close>Cancelar</button><button class="btn pri" id="pws">Guardar PIN</button>`
   });
   md.$('#pws').onclick = () => busy(md.$('#pws'), async () => {
-    const a = md.$('#pw1').value, b = md.$('#pw2').value;
-    if (a.length < 6) return showErr(md.$('#pwe'), 'La contraseña debe tener al menos 6 caracteres.');
-    if (a !== b) return showErr(md.$('#pwe'), 'Las contraseñas no coinciden.');
-    try { await API.rpc('admin_cambiar_password', { p_id: u.id, p_password: a }); md.close(); toast('Contraseña actualizada.', 'ok'); }
+    const a = md.$('#pw1').value.trim(), b = md.$('#pw2').value.trim();
+    if (!esPin(a)) return showErr(md.$('#pwe'), 'El PIN debe tener entre 4 y 6 números.');
+    if (a !== b) return showErr(md.$('#pwe'), 'Los PIN no coinciden.');
+    try { await API.rpc('admin_cambiar_password', { p_id: u.id, p_password: pinPass(a) }); md.close(); toast(`PIN actualizado para ${esc(u.nombre_completo)}.`, 'ok'); }
     catch (e) { showErr(md.$('#pwe'), errMsg(e)); }
   });
 }
@@ -2112,14 +2346,14 @@ async function toggleUsuario(u) {
   const ok = await confirmar({ title: u.activo ? 'Desactivar usuario' : 'Activar usuario', ok: u.activo ? 'Desactivar' : 'Activar',
     body: u.activo ? `<p><b>${esc(u.nombre_completo)}</b> no podrá iniciar sesión. Sus movimientos quedan en el historial.</p>` : `<p><b>${esc(u.nombre_completo)}</b> podrá volver a iniciar sesión.</p>` });
   if (!ok) return;
-  try { await API.rpc('admin_guardar_usuario', { p_id: u.id, p_nombre: u.nombre_completo, p_rol: u.rol, p_activo: !u.activo }); S.perfiles = await API.perfiles(); paintCurrent(); toast(u.activo ? 'Usuario desactivado.' : 'Usuario activado.', 'ok'); }
+  try { await guardarUsuario({ p_id: u.id, p_nombre: u.nombre_completo, p_rol: u.rol, p_activo: !u.activo }); S.perfiles = await API.perfiles(); paintCurrent(); toast(u.activo ? 'Usuario desactivado.' : 'Usuario activado.', 'ok'); }
   catch (e) { toast(esc(errMsg(e)), 'bad'); }
 }
 async function borrarUsuario(u) {
   if (S.movs.some(m => m.usuario_id === u.id)) {
     const ok = await confirmar({ title: 'Este usuario tiene historial', ok: u.activo ? 'Desactivar en su lugar' : 'Entendido',
       body: `<div class="callout warn">${ic('triangle-alert', 's')}<span><b>${esc(u.nombre_completo)}</b> registró movimientos. Para no perder la trazabilidad no se puede eliminar.</span></div>${u.activo ? '<p>Puedes desactivarlo: no podrá entrar y su historial se conserva.</p>' : ''}` });
-    if (ok && u.activo) { try { await API.rpc('admin_guardar_usuario', { p_id: u.id, p_nombre: u.nombre_completo, p_rol: u.rol, p_activo: false }); S.perfiles = await API.perfiles(); paintCurrent(); toast('Usuario desactivado.', 'ok'); } catch (e) { toast(esc(errMsg(e)), 'bad'); } }
+    if (ok && u.activo) { try { await guardarUsuario({ p_id: u.id, p_nombre: u.nombre_completo, p_rol: u.rol, p_activo: false }); S.perfiles = await API.perfiles(); paintCurrent(); toast('Usuario desactivado.', 'ok'); } catch (e) { toast(esc(errMsg(e)), 'bad'); } }
     return;
   }
   const ok = await confirmar({ title: 'Eliminar usuario', ok: 'Eliminar', danger: true, body: `<p>Se eliminará la cuenta de <b>${esc(u.nombre_completo)}</b> (${esc(u.usuario)}). Queda registrado en la auditoría.</p>` });
@@ -2131,10 +2365,10 @@ async function borrarUsuario(u) {
 /* =============================================================
    VISTA: AUDITORÍA
    ============================================================= */
-const TABLAS_AUD = { premios: 'Premios', movimientos: 'Movimientos', perfiles: 'Usuarios', categorias: 'Categorías', configuracion: 'Configuración' };
+const TABLAS_AUD = { premios: 'Premios', movimientos: 'Movimientos', perfiles: 'Usuarios', categorias: 'Categorías', configuracion: 'Configuración', sectores: 'Sectores' };
 const CAMPOS = {
   nombre: 'Nombre', codigo: 'Código', descripcion: 'Descripción', categoria_id: 'Categoría', imagen_url: 'Imagen', stock_minimo: 'Stock mínimo',
-  activo: 'Activo', usuario: 'Usuario', nombre_completo: 'Nombre completo', rol: 'Rol', valor: 'Valor', clave: 'Clave',
+  activo: 'Activo', usuario: 'Usuario', sector_ids: 'Sectores', sector_nombre: 'Sector', grupo: 'Grupo', orden: 'Orden', nombre_completo: 'Nombre completo', rol: 'Rol', valor: 'Valor', clave: 'Clave',
   estado: 'Estado', cantidad: 'Cantidad', cantidad_corregida: 'Cantidad corregida', motivo_modificacion: 'Motivo', modificado_por_nombre: 'Modificado por',
   stock_actual: 'Stock actual', premio_nombre: 'Premio', tipo: 'Tipo', delta: 'Efecto en stock', observacion: 'Observación', usuario_nombre: 'Registrado por',
   stock_anterior: 'Stock anterior', stock_nuevo: 'Stock resultante', creado_en: 'Fecha de creación', movimiento_correccion_id: 'Movimiento de corrección', movimiento_anulacion_id: 'Movimiento de anulación'
@@ -2153,7 +2387,8 @@ function audValor(k, v) {
   if (k === 'categoria_id') return catName(v);
   if (k === 'imagen_url') return 'Imagen cargada';
   if (/_en$/.test(k)) return fFH(v);
-  if (k === 'rol') return v === 'admin' ? 'Administrador' : 'Usuario';
+  if (k === 'rol') return (ROLES[v] || {}).t || v;
+  if (k === 'sector_ids') return Array.isArray(v) ? nombresSectores(v) : String(v);
   return String(v);
 }
 function filtrarAud(rows) {
@@ -2235,7 +2470,7 @@ function modalAud(a) {
    VISTA: PERFIL
    ============================================================= */
 VIEWS.perfil = {
-  title: () => (S.params.id && S.params.id !== S.perfil.id && isAdmin()) ? 'Perfil de usuario' : 'Mi perfil',
+  title: () => (S.params.id && S.params.id !== S.perfil.id && isAdmin()) ? 'Perfil de usuario' : (isAdmin() ? 'Mi perfil' : 'Mis retiros'),
   mount(el) {
     this.uid = (isAdmin() && S.params.id) ? S.params.id : S.perfil.id;
     if (this.uid !== this.lastUid) { S.f.perf = defaultsF().perf; this.lastUid = this.uid; }
@@ -2245,19 +2480,19 @@ VIEWS.perfil = {
         <span class="avatar" style="width:64px;height:64px;font-size:22px">${esc(iniciales(u.nombre_completo))}</span>
         <div><div style="font-size:20px;font-weight:600">${esc(u.nombre_completo)}</div>
           <div class="muted">Usuario: <span class="tab">${esc(u.usuario)}</span></div>
-          <div class="row" style="margin-top:6px;gap:6px">${u.rol === 'admin' ? `<span class="badge t-correccion">${ic('shield-check')}Administrador</span>` : `<span class="badge t-salida">${ic('user-round')}Usuario</span>`}
+          <div class="row" style="margin-top:6px;gap:6px">${rolBadge(u.rol)}
           ${u.activo ? '<span class="badge ok"><span class="d"></span>Activo</span>' : '<span class="badge mute"><span class="d"></span>Inactivo</span>'}</div></div>
         <span class="sp"></span>
         ${isAdmin() && u.id !== S.perfil.id ? `<a class="btn" href="#/historial?usuario=${u.id}">${ic('history', 's')}Ver en historial</a>` : ''}
       </div></div></div>
-      <div class="kpis mt" id="pf-k" style="grid-template-columns:repeat(4,1fr)"></div>
+      <div class="kpis k4 mt" id="pf-k"></div>
       <div class="panel">
         <div class="panel-h"><h2>Historial personal</h2><span class="sp"></span>${expBtns('perf')}</div>
         <div class="panel-b" style="padding-bottom:4px"><div class="toolbar">
           <div class="in-ic">${ic('search')}<input class="in" id="pf-q" placeholder="Buscar premio u observación" value="${esc(f.q)}"></div>
           <select class="in" id="pf-t" aria-label="Tipo"><option value="">Todos los tipos</option>${Object.entries(TIPOS).map(([k, v]) => `<option value="${k}" ${f.tipo === k ? 'selected' : ''}>${v.t}</option>`).join('')}</select>
         </div></div>
-        <div class="tbl-wrap"><table class="rt cards">
+        <div class="tbl-wrap"><table class="rt resp">
           <thead><tr><th>Fecha</th><th>Hora</th><th>Tipo</th><th>Premio</th><th class="n">Cantidad</th><th class="n">Stock anterior</th><th class="n">Stock actual</th><th>Observación</th></tr></thead>
           <tbody id="pf-tb"></tbody></table></div>
         <div class="pager" id="pf-pg"></div>
@@ -2291,7 +2526,7 @@ VIEWS.perfil = {
       <td data-label="Tipo">${badgeTipo(m.tipo)}</td><td data-label="Premio"><span class="pname">${esc(pNombre(m))}</span></td>
       <td data-label="Cantidad" class="n"><span class="${m.delta > 0 ? 'diff-pos' : 'diff-neg'}">${signo(m.delta)}</span>${m.estado !== 'vigente' ? `<div class="small muted">${estadoMovTxt(m)}</div>` : ''}</td>
       <td data-label="Stock anterior" class="n num">${fNum(m.stock_anterior)}</td><td data-label="Stock actual" class="n num strong">${fNum(m.stock_nuevo)}</td>
-      <td data-label="Observación"><span class="muted">${esc(m.observacion || '—')}</span></td></tr>`).join('')
+      <td data-label="Observación"><span class="muted">${esc(m.observacion || '—')}</span></td>${mobMov(m, '')}</tr>`).join('')
       : emptyRow(8, 'Sin movimientos', this.uid === S.perfil.id ? 'Cuando registres un retiro aparecerá aquí.' : '', 'history');
     $('#pf-pg').innerHTML = `<span>${rows.length ? `${f.page * P + 1}–${f.page * P + vis.length} de ${fNum(rows.length)}` : ''}</span><span class="sp"></span>
       <button class="btn sm" data-pg="-1" ${f.page === 0 ? 'disabled' : ''}>${ic('chevron-left', 's')}Anterior</button>
@@ -2312,11 +2547,11 @@ VIEWS.configuracion = {
           <div class="panel"><div class="panel-h"><h2>Apariencia</h2></div><div class="panel-b">
             <label class="check"><input type="checkbox" id="c-dark" ${dark ? 'checked' : ''}>Usar modo oscuro</label>
             <p class="muted small" style="margin:8px 0 0">Se guarda en este dispositivo.</p></div></div>
-          <div class="panel"><div class="panel-h"><h2>Mi contraseña</h2></div><div class="panel-b stack">
+          <div class="panel"><div class="panel-h"><h2>Mi PIN</h2></div><div class="panel-b stack">
             <div class="form-err" id="c-pe"></div>
-            <div class="grid2"><div class="field"><label for="c-p1">Nueva contraseña</label><input class="in" id="c-p1" type="password" autocomplete="new-password"></div>
-            <div class="field"><label for="c-p2">Repetir contraseña</label><input class="in" id="c-p2" type="password" autocomplete="new-password"></div></div>
-            <div><button class="btn pri" id="c-ps">Cambiar mi contraseña</button></div></div></div>
+            <div class="grid2"><div class="field"><label for="c-p1">Nuevo PIN (4 a 6 números)</label><input class="in pin-in" id="c-p1" type="password" inputmode="numeric" maxlength="6" autocomplete="new-password"></div>
+            <div class="field"><label for="c-p2">Repetir PIN</label><input class="in pin-in" id="c-p2" type="password" inputmode="numeric" maxlength="6" autocomplete="new-password"></div></div>
+            <div><button class="btn pri" id="c-ps">Cambiar mi PIN</button></div></div></div>
           ${admin ? `<div class="panel"><div class="panel-h"><h2>Sucursal y alertas</h2></div><div class="panel-b stack">
             <div class="field"><label for="c-suc">Nombre de la sucursal</label><input class="in" id="c-suc" value="${esc(S.config.nombre_sucursal || '')}"><span class="hint">Aparece en el menú y en los reportes PDF.</span></div>
             <div class="field"><label for="c-umb">Umbral de ajuste importante</label><input class="in num" id="c-umb" type="number" min="1" value="${esc(S.config.umbral_ajuste_importante || '10')}" style="max-width:160px"><span class="hint">Un ajuste de esta cantidad de unidades o más genera una alerta.</span></div>
@@ -2328,15 +2563,16 @@ VIEWS.configuracion = {
           <div class="panel-h" style="border-top:1px solid var(--line);padding-top:16px"><h2>Sectores</h2><span class="sub">Para el retiro rápido</span></div><div class="panel-b">
           <form class="row" id="c-secf" style="flex-wrap:nowrap;margin-bottom:8px"><input class="in" id="c-secn" placeholder="Nuevo sector"><input class="in" id="c-secg" placeholder="Grupo (opcional)" style="max-width:150px"><button class="btn pri">${ic('plus', 's')}Agregar</button></form>
           <div id="c-secs"></div></div></div>` : `<div class="panel" style="align-self:start"><div class="panel-h"><h2>Tu cuenta</h2></div><div class="panel-b">
-          <dl class="kv"><dt>Nombre</dt><dd>${esc(S.perfil.nombre_completo)}</dd><dt>Usuario</dt><dd>${esc(S.perfil.usuario)}</dd><dt>Rol</dt><dd>Usuario</dd></dl>
+          <dl class="kv"><dt>Nombre</dt><dd>${esc(S.perfil.nombre_completo)}</dd><dt>Usuario</dt><dd>${esc(S.perfil.usuario)}</dd><dt>Rol</dt><dd>${(ROLES[rolActual()] || {}).t || ''}</dd>
+          ${S.sectores.length ? `<dt>Sectores</dt><dd>${esc(nombresSectores(S.perfil.sector_ids))}</dd>` : ''}</dl>
           <p class="muted small">Para cambiar tu nombre o rol, consulta con un administrador.</p></div></div>`}
       </div>`;
     $('#c-dark').onchange = e => setTheme(e.target.checked ? 'dark' : 'light');
     $('#c-ps').onclick = () => busy($('#c-ps'), async () => {
-      const a = $('#c-p1').value, b = $('#c-p2').value;
-      if (a.length < 6) return showErr($('#c-pe'), 'La contraseña debe tener al menos 6 caracteres.');
-      if (a !== b) return showErr($('#c-pe'), 'Las contraseñas no coinciden.');
-      try { await API.cambiarMiPassword(a); $('#c-p1').value = $('#c-p2').value = ''; showErr($('#c-pe'), ''); toast('Tu contraseña se cambió.', 'ok'); }
+      const a = $('#c-p1').value.trim(), b = $('#c-p2').value.trim();
+      if (!esPin(a)) return showErr($('#c-pe'), 'El PIN debe tener entre 4 y 6 números.');
+      if (a !== b) return showErr($('#c-pe'), 'Los PIN no coinciden.');
+      try { await API.cambiarMiPassword(pinPass(a)); $('#c-p1').value = $('#c-p2').value = ''; showErr($('#c-pe'), ''); toast('Tu PIN se cambió.', 'ok'); }
       catch (e) { showErr($('#c-pe'), errMsg(e)); }
     });
     if (!admin) return;
