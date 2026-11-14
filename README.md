@@ -13,6 +13,7 @@ styles.css            Estilos (modo claro y oscuro)
 app.js                Lógica de la aplicación
 config.js             Datos de conexión a Supabase (completar)
 supabase/schema.sql   Base de datos completa: tablas, seguridad, funciones, auditoría
+supabase/migracion_02_retiro_rapido.sql   Sectores y Retiro rápido (ejecutar después de schema.sql)
 ```
 
 ---
@@ -32,6 +33,8 @@ supabase/schema.sql   Base de datos completa: tablas, seguridad, funciones, audi
 3. Debe terminar con "Success. No rows returned".
 
 Esto crea todas las tablas, las reglas de seguridad, el tiempo real y el espacio para las imágenes de los premios.
+
+4. Abre otra **New query**, pega el contenido de `supabase/migracion_02_retiro_rapido.sql` y presiona **Run**. Agrega los sectores (Promoción; Salón: Recepción, Pretest, Full test; Ventas) y el Retiro rápido. Se puede ejecutar de nuevo sin problema: no borra datos.
 
 ### 3. Configurar el inicio de sesión
 
@@ -74,12 +77,26 @@ La clave publicable es pública por diseño: la seguridad la garantizan las regl
 
 ## Cómo funciona
 
+### Retiro rápido (reemplazo del grupo de WhatsApp)
+
+Es la pantalla con la que abre la app para los usuarios. Está pensada para el celular:
+
+1. **Sector:** la primera vez se elige (Promoción, Recepción, Pretest, Full test o Ventas). El celular lo recuerda; para cambiarlo se toca otro sector arriba.
+2. **Premios:** cada toque en un premio suma 1. El número azul muestra cuántos llevas; el botón "−" resta. Los más retirados por ese sector aparecen primero.
+3. **Registrar:** un solo toque. Se guardan el usuario, el sector, la fecha y la hora. Si un premio no alcanza, no se registra nada y avisa cuál falta.
+4. **Deshacer:** aparece durante 10 segundos después de registrar. Cada usuario puede deshacer sus propios retiros hasta 10 minutos después; pasado ese tiempo, solo un administrador puede anularlos desde el Historial. Todo queda en la auditoría.
+
+Opcional: el ícono de mensaje agrega una nota al retiro.
+
+Los administradores pueden agregar, renombrar, agrupar, ordenar o desactivar sectores en **Configuración**. El sector aparece en el Historial (con filtro), en el Dashboard (retirado hoy por sector) y en Reportes (salidas por sector, exportable).
+
 ### Roles
 
 | | Administrador | Usuario |
 |---|---|---|
 | Ver stock y dashboard | Sí | Sí |
-| Registrar retiros | Sí | Sí |
+| Retiro rápido por sector y registrar retiros | Sí | Sí |
+| Deshacer sus propios retiros (10 min) | Sí | Sí |
 | Registrar ingresos y ajustes | Sí | No |
 | Crear, editar, desactivar o eliminar premios | Sí | No |
 | Historial completo, "¿quién lo sacó?" | Sí | Solo su propio historial |

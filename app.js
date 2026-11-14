@@ -59,6 +59,7 @@ const ALERTAS = {
 };
 const NAV = [
   { id: 'dashboard',     t: 'Dashboard',            i: 'layout-dashboard' },
+  { id: 'rapido',        t: 'Retiro rápido',        i: 'zap' },
   { id: 'stock',         t: 'Stock de Premios',     i: 'boxes' },
   { id: 'movimiento',    t: 'Registrar Movimiento', i: 'arrow-left-right' },
   { id: 'historial',     t: 'Historial',            i: 'history',         admin: true },
@@ -75,7 +76,8 @@ const NAV = [
 let API = null;
 const S = {
   user: null, perfil: null,
-  premios: [], categorias: [], perfiles: [], movs: [], alertas: [], config: {},
+  premios: [], categorias: [], perfiles: [], movs: [], alertas: [], config: {}, sectores: [],
+  rap: { sector: null, cart: {}, obs: '', q: '', nota: false },
   view: 'dashboard', params: {}, charts: [], flashes: {},
   live: 'off', unsub: null, lastSync: 0, wasOff: false,
   f: null, invCounts: {}
@@ -86,7 +88,7 @@ function defaultsF() {
   return {
     stock: { q: '', cat: '', est: '', sort: 'nombre', inact: false },
     mov:   { tipo: 'salida', premioId: null, q: '' },
-    hist:  { q: '', usuario: '', premio: '', tipo: '', desde: '', hasta: '', page: 0 },
+    hist:  { q: '', usuario: '', premio: '', tipo: '', sector: '', desde: '', hasta: '', page: 0 },
     rep:   { desde: hoy.slice(0, 8) + '01', hasta: hoy, agrupar: 'dia', premio: '', usuario: '' },
     usr:   { q: '', rol: '' },
     aud:   { q: '', tabla: '', desde: '', hasta: '' },
@@ -107,6 +109,12 @@ const salidasVig = (arr = S.movs) => arr.filter(m => m.tipo === 'salida' && m.es
 const ingresosVig = (arr = S.movs) => arr.filter(m => m.tipo === 'ingreso' && m.estado !== 'anulado');
 const inRange = (m, desde, hasta) => { const d = ymd(m.creado_en); return (!desde || d >= desde) && (!hasta || d <= hasta); };
 const byName = (a, b) => a.nombre.localeCompare(b.nombre, 'es');
+const sectorDe = id => S.sectores.find(x => x.id === Number(id));
+const sectorLabel = x => x ? (x.grupo ? `${x.grupo} · ${x.nombre}` : x.nombre) : '';
+const sectoresActivos = () => S.sectores.filter(x => x.activo).sort((a, b) => a.orden - b.orden || a.nombre.localeCompare(b.nombre, 'es'));
+const lsSector = () => `sp_sector_${S.perfil ? S.perfil.id : ''}`;
+const optSectores = (sel, todos) => (todos ? S.sectores.slice().sort((a, b) => a.orden - b.orden) : sectoresActivos())
+  .map(x => `<option value="${x.id}" ${String(sel) === String(x.id) ? 'selected' : ''}>${esc(sectorLabel(x))}${x.activo ? '' : ' (inactivo)'}</option>`).join('');
 
 const badgeEstado = p => {
   if (!p.activo) return '<span class="badge mute"><span class="d"></span>Desactivado</span>';
@@ -181,6 +189,9 @@ function createAPI(sb) {
     async miPerfil(id) { return T(await sb.from('perfiles').select('*').eq('id', id).maybeSingle()); },
     premios: () => all(() => sb.from('premios').select('*').order('nombre')),
     async categorias() { return T(await sb.from('categorias').select('*').order('nombre')); },
+    async sectores() { return T(await sb.from('sectores').select('*').order('orden')); },
+    async crearSector(d) { return T(await sb.from('sectores').insert(d).select().single()); },
+    async editarSector(id, d) { return T(await sb.from('sectores').update(d).eq('id', id).select().single()); },
     async perfiles() { return T(await sb.from('perfiles').select('*').order('nombre_completo')); },
     async config() { const d = T(await sb.from('configuracion').select('*')); return Object.fromEntries(d.map(r => [r.clave, r.valor])); },
     movimientos: () => all(() => sb.from('movimientos').select('*').order('id', { ascending: false })),
@@ -214,7 +225,7 @@ function createAPI(sb) {
     async cambiarMiPassword(p) { T(await sb.auth.updateUser({ password: p })); },
     subscribe(h) {
       const ch = sb.channel('stock-premios-rt');
-      ['premios', 'movimientos', 'alertas', 'categorias', 'configuracion'].forEach(t =>
+      ['premios', 'movimientos', 'alertas', 'categorias', 'configuracion', 'sectores'].forEach(t =>
         ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, p => h.change(t, p)));
       ch.subscribe(st => h.status(st));
       return () => { try { sb.removeChannel(ch); } catch (e) { /* ignorar */ } };
@@ -265,10 +276,11 @@ async function enter(user) {
 }
 
 async function loadAll() {
-  const [premios, categorias, perfiles, config, movs, alertas] = await Promise.all([
-    API.premios(), API.categorias(), API.perfiles(), API.config(), API.movimientos(), API.alertas()
+  const [premios, categorias, perfiles, config, movs, alertas, sectores] = await Promise.all([
+    API.premios(), API.categorias(), API.perfiles(), API.config(), API.movimientos(), API.alertas(),
+    API.sectores ? API.sectores().catch(() => []) : Promise.resolve([])
   ]);
-  Object.assign(S, { premios, categorias, perfiles, config, movs, alertas, lastSync: Date.now() });
+  Object.assign(S, { premios, categorias, perfiles, config, movs, alertas, sectores, lastSync: Date.now() });
   const me = perfiles.find(p => p.id === S.perfil.id);
   if (me) S.perfil = me;
 }
@@ -501,7 +513,7 @@ function go(view, params) {
 window.addEventListener('hashchange', () => { if (S.perfil) route(); });
 
 function route() {
-  const raw = location.hash.replace(/^#\/?/, '') || 'dashboard';
+  const raw = location.hash.replace(/^#\/?/, '') || (isAdmin() ? 'dashboard' : 'rapido');
   const [path, qs] = raw.split('?');
   let id = VIEWS[path] ? path : 'dashboard';
   const nav = NAV.find(n => n.id === id);
@@ -509,6 +521,7 @@ function route() {
   S.view = id;
   S.params = Object.fromEntries(new URLSearchParams(qs || ''));
   destroyCharts();
+  document.body.classList.remove('has-bar');
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.nav === id));
   $('#ttl').textContent = VIEWS[id].title();
   closeNav();
@@ -621,14 +634,16 @@ function confirmar({ title, body, ok = 'Confirmar', danger = false }) {
     setTimeout(() => m.$('#m-ok') && m.$('#m-ok').focus(), 50);
   });
 }
-function toast(html, type = 'info', ms = 5000) {
+function toast(html, type = 'info', ms = 5000, action) {
   const el = document.createElement('div');
   el.className = 'toast ' + type;
   const i = { ok: 'circle-check', bad: 'circle-x', warn: 'triangle-alert', info: 'info' }[type] || 'info';
-  el.innerHTML = `${ic(i)}<div>${html}</div><button class="x" aria-label="Cerrar">${ic('x', 's')}</button>`;
+  el.innerHTML = `${ic(i)}<div style="flex:1">${html}</div>${action ? `<button class="btn sm" data-ta>${esc(action.label)}</button>` : ''}<button class="x" aria-label="Cerrar">${ic('x', 's')}</button>`;
   $('#toasts').append(el); icons();
   el.querySelector('.x').onclick = () => el.remove();
+  if (action) el.querySelector('[data-ta]').onclick = async e => { await busy(e.currentTarget, action.onClick); el.remove(); };
   setTimeout(() => el.remove(), ms);
+  return el;
 }
 function showErr(el, msg) { if (!el) return; el.textContent = msg; el.classList.toggle('show', !!msg); }
 async function busy(btn, fn) {
@@ -713,6 +728,7 @@ const MOV_COLS = [
   { h: 'Fecha', v: m => fFecha(m.creado_en) },
   { h: 'Hora', v: m => fHora(m.creado_en) },
   { h: 'Usuario', v: m => m.usuario_nombre },
+  { h: 'Sector', v: m => m.sector_nombre || '' },
   { h: 'Tipo', v: m => TIPOS[m.tipo].t },
   { h: 'Premio', v: m => pNombre(m) },
   { h: 'Cantidad', v: m => m.delta },
@@ -748,6 +764,7 @@ VIEWS.dashboard = {
       <div class="cols-2e mt">
         <div class="panel"><div class="panel-h"><h2>Últimos movimientos</h2><span class="sp"></span><a class="btn ghost sm" href="#/historial">Ver historial</a></div><div class="panel-b flush"><ul class="list" id="d-movs"></ul></div></div>
         <div class="gap" style="align-content:start">
+          <div class="panel"><div class="panel-h"><h2>Retirado hoy por sector</h2><span class="sub">Unidades</span></div><div class="panel-b flush" id="d-sec"></div></div>
           <div class="panel"><div class="panel-h"><h2>Últimas personas que retiraron</h2></div><div class="panel-b flush"><ul class="list" id="d-personas"></ul></div></div>
           <div class="panel"><div class="panel-h"><h2>Premios más retirados</h2><span class="sub">Este mes</span></div><div class="panel-b flush" id="d-top"></div></div>
         </div>
@@ -757,7 +774,7 @@ VIEWS.dashboard = {
           <div class="panel-h"><h2>Registrar un retiro</h2></div>
           <div class="panel-b stack">
             <p class="muted" style="margin:0">Elige el premio y la cantidad que retiras. Tu nombre, la fecha y la hora se guardan solos.</p>
-            <div><a class="btn pri lg" href="#/movimiento">${ic('package-minus')}Registrar retiro</a></div>
+            <div><a class="btn pri lg" href="#/rapido">${ic('zap')}Retiro rápido</a></div>
           </div>
         </div>
         <div class="panel"><div class="panel-h"><h2>Alertas de stock</h2></div><div class="panel-b flush"><ul class="list" id="d-alertas"></ul></div></div>
@@ -812,7 +829,7 @@ VIEWS.dashboard = {
     const movs = S.movs.slice(0, 8);
     $('#d-movs').innerHTML = movs.length ? movs.map(m => `
       <li><span class="mv-ic t-${m.tipo}">${ic(TIPOS[m.tipo].i, 's')}</span>
-      <div class="grow"><div class="t1">${fraseMov(m)}</div><div class="t2">${rel(m.creado_en)}${m.observacion ? ` · ${esc(trunc(m.observacion, 60))}` : ''}</div></div>
+      <div class="grow"><div class="t1">${fraseMov(m)}</div><div class="t2">${rel(m.creado_en)}${m.sector_nombre ? ` · ${esc(m.sector_nombre)}` : ''}${m.observacion ? ` · ${esc(trunc(m.observacion, 60))}` : ''}</div></div>
       <span class="v ${m.delta > 0 ? 'diff-pos' : 'diff-neg'}">${signo(m.delta)}</span></li>`).join('')
       : `<li><div class="empty" style="width:100%">${ic('inbox')}<b>Todavía no hay movimientos</b>${admin ? 'Carga premios y registra el primer ingreso.' : 'Cuando registres un retiro aparecerá aquí.'}</div></li>`;
 
@@ -824,6 +841,14 @@ VIEWS.dashboard = {
     $('#d-personas').innerHTML = personas.length ? personas.map(m => `
       <li><span class="avatar">${esc(iniciales(m.usuario_nombre))}</span><div class="grow"><div class="t1">${esc(m.usuario_nombre)}</div><div class="t2">${fNum(qtyEf(m))} × ${esc(pNombre(m))}</div></div><span class="muted small">${rel(m.creado_en)}</span></li>`).join('')
       : `<li><div class="empty" style="width:100%">${ic('users')}<b>Sin retiros todavía</b></div></li>`;
+
+    // hoy por sector
+    const ps = {};
+    sal.filter(m => ymd(m.creado_en) === hoy).forEach(m => { const k = m.sector_nombre || 'Sin sector'; ps[k] = (ps[k] || 0) + qtyEf(m); });
+    const psl = Object.entries(ps).sort((a, b) => b[1] - a[1]);
+    const psm = psl.length ? psl[0][1] : 1;
+    $('#d-sec').innerHTML = psl.length ? psl.map(([k, n]) => `<div class="hbar"><span class="nm">${esc(k)}</span><span class="tr"><i style="width:${(n / psm * 100).toFixed(1)}%"></i></span><span class="num strong">${fNum(n)}</span></div>`).join('')
+      : `<div class="empty">${ic('zap')}<b>Hoy todavía no hubo retiros</b></div>`;
 
     // top del mes
     const tot = {};
@@ -1186,7 +1211,8 @@ VIEWS.movimiento = {
         <div class="stepper"><button type="button" data-st="-1" aria-label="Restar uno">${ic('minus')}</button>
         <input id="m-n" type="number" inputmode="numeric" min="${aj ? 0 : 1}" step="1" value="${aj ? '' : 1}">
         <button type="button" data-st="1" aria-label="Sumar uno">${ic('plus')}</button></div>
-        ${aj ? '<span class="hint">Escribe cuántas unidades hay realmente. El sistema calcula la diferencia.</span>' : ''}</div>`;
+        ${aj ? '<span class="hint">Escribe cuántas unidades hay realmente. El sistema calcula la diferencia.</span>' : ''}</div>
+      ${f.tipo === 'salida' && S.sectores.length ? `<div class="field"><label for="m-sec">Sector</label><select class="in" id="m-sec"><option value="">Sin sector</option>${optSectores(S.rap.sector || '')}</select></div>` : ''}`;
     $('#m-obs-l').textContent = aj ? 'Motivo del ajuste (obligatorio)' : 'Observación (opcional)';
     $('#m-obs').placeholder = aj ? 'Ej.: Diferencia detectada durante el inventario' : f.tipo === 'ingreso' ? 'Ej.: Remito 0001-2345 del proveedor' : 'Ej.: Premios entregados en la acción de vereda';
     $('#m-go').textContent = aj ? 'Registrar ajuste' : f.tipo === 'ingreso' ? 'Registrar ingreso' : 'Registrar retiro';
@@ -1277,7 +1303,8 @@ VIEWS.movimiento = {
       try {
         const mov = f.tipo === 'ajuste'
           ? await API.rpc('registrar_ajuste', { p_premio_id: c.p.id, p_stock_fisico: c.n, p_motivo: c.obs })
-          : await API.rpc('registrar_movimiento', { p_premio_id: c.p.id, p_tipo: f.tipo, p_cantidad: c.n, p_observacion: c.obs || null });
+          : await API.rpc('registrar_movimiento', Object.assign({ p_premio_id: c.p.id, p_tipo: f.tipo, p_cantidad: c.n, p_observacion: c.obs || null },
+              S.sectores.length ? { p_sector_id: f.tipo === 'salida' && $('#m-sec') && $('#m-sec').value ? +$('#m-sec').value : null } : {}));
         aplicarMovLocal(mov);
         const verbo = { salida: 'Retiro registrado', ingreso: 'Ingreso registrado', ajuste: 'Ajuste registrado' }[f.tipo];
         toast(`<b>${verbo}.</b> ${esc(c.p.nombre)}: ${fNum(mov.stock_anterior)} → ${fNum(mov.stock_nuevo)} unidades.`, 'ok');
@@ -1286,6 +1313,160 @@ VIEWS.movimiento = {
         this.paint(); icons(); applyFlashes();
         updateNavBadge();
       } catch (e) { showErr($('#m-err'), errMsg(e)); }
+    });
+  }
+};
+
+/* =============================================================
+   VISTA: RETIRO RÁPIDO  (sector → tocar premios → registrar)
+   ============================================================= */
+VIEWS.rapido = {
+  title: () => 'Retiro rápido',
+  mount(el) {
+    const R = S.rap;
+    if (R.sector == null) { try { R.sector = Number(localStorage.getItem(lsSector())) || null; } catch (e) { /* ignorar */ } }
+    if (R.sector && !(sectorDe(R.sector) || {}).activo) R.sector = null;
+    document.body.classList.add('has-bar');
+    this.ord = null;
+    el.innerHTML = `
+      <div class="rap">
+        <div id="rp-sec"></div>
+        <div id="rp-tools"></div>
+        <div id="rp-grid"></div>
+      </div>
+      <div class="rap-bar" id="rp-bar"></div>`;
+    el.onclick = e => this.click(e);
+    el.oninput = e => {
+      if (e.target.id === 'rp-q') { R.q = e.target.value; this.paintGrid(); icons(); }
+      if (e.target.id === 'rp-obs') R.obs = e.target.value;
+    };
+    this.paint();
+  },
+  click(e) {
+    const R = S.rap, t = e.target;
+    const sec = t.closest('[data-sec]');
+    if (sec) {
+      R.sector = +sec.dataset.sec;
+      try { localStorage.setItem(lsSector(), String(R.sector)); } catch (er) { /* ignorar */ }
+      this.paint(); icons(); return;
+    }
+    const sub = t.closest('[data-sub]');
+    if (sub) { const id = sub.dataset.sub; R.cart[id] = (R.cart[id] || 0) - 1; if (R.cart[id] <= 0) delete R.cart[id]; this.paintGrid(); this.paintBar(); icons(); return; }
+    const add = t.closest('[data-add]');
+    if (add) {
+      if (!R.sector) { toast('Primero elige tu sector.', 'warn', 2500); return; }
+      const p = premio(add.dataset.add); if (!p || p.stock_actual <= 0) return;
+      const n = (R.cart[p.id] || 0) + 1;
+      if (n > p.stock_actual) { toast(`Solo quedan ${fNum(p.stock_actual)} de ${esc(p.nombre)}.`, 'warn', 2500); return; }
+      R.cart[p.id] = n;
+      if (navigator.vibrate) { try { navigator.vibrate(12); } catch (er) { /* ignorar */ } }
+      this.paintGrid(); this.paintBar(); icons(); return;
+    }
+    const rm = t.closest('[data-rm]');
+    if (rm) { delete R.cart[rm.dataset.rm]; this.paintGrid(); this.paintBar(); icons(); return; }
+    if (t.closest('#rp-clear')) { R.cart = {}; R.obs = ''; R.nota = false; this.paintGrid(); this.paintBar(); icons(); return; }
+    if (t.closest('#rp-nota')) { R.nota = !R.nota; this.paintBar(); icons(); if (R.nota) setTimeout(() => $('#rp-obs') && $('#rp-obs').focus(), 30); return; }
+    if (t.closest('#rp-go')) this.submit();
+  },
+  paint() {
+    if (!$('#rp-sec')) return;
+    this.paintSec(); this.paintGrid(); this.paintBar();
+  },
+  paintSec() {
+    const R = S.rap, secs = sectoresActivos();
+    if (!S.sectores.length) {
+      $('#rp-sec').innerHTML = `<div class="callout warn">${ic('triangle-alert', 's')}<span>Faltan los sectores en la base de datos. ${isAdmin() ? 'Ejecuta el archivo <b>migracion_02_retiro_rapido.sql</b> en Supabase (ver README).' : 'Avisa a un administrador.'}</span></div>`;
+      return;
+    }
+    if (!R.sector) {
+      $('#rp-sec').innerHTML = `<h2 class="rap-q">¿Para qué sector retiras?</h2>
+        <div class="sec-grid">${secs.map(x => `<button class="sec-big" data-sec="${x.id}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>`;
+      return;
+    }
+    $('#rp-sec').innerHTML = `<div class="sec-row" role="radiogroup" aria-label="Sector">${secs.map(x => `
+      <button class="sec-chip ${x.id === R.sector ? 'on' : ''}" data-sec="${x.id}" role="radio" aria-checked="${x.id === R.sector}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>`;
+  },
+  orden() {
+    const R = S.rap, desde = Date.now() - 30 * 864e5;
+    const fs = {}, fg = {};
+    salidasVig().forEach(m => {
+      if (new Date(m.creado_en) < desde) return;
+      fg[m.premio_id] = (fg[m.premio_id] || 0) + qtyEf(m);
+      if (m.sector_id === R.sector) fs[m.premio_id] = (fs[m.premio_id] || 0) + qtyEf(m);
+    });
+    return S.premios.filter(p => p.activo).sort((a, b) =>
+      (b.stock_actual > 0) - (a.stock_actual > 0) || (fs[b.id] || 0) - (fs[a.id] || 0) || (fg[b.id] || 0) - (fg[a.id] || 0) || byName(a, b));
+  },
+  paintGrid() {
+    const R = S.rap, box = $('#rp-grid'); if (!box) return;
+    if (!R.sector || !S.sectores.length) { box.innerHTML = ''; $('#rp-tools').innerHTML = ''; return; }
+    // el orden se calcula al entrar o al cambiar de sector y queda fijo: los botones no cambian de lugar
+    if (!this.ord || this.ord.sector !== R.sector) this.ord = { sector: R.sector, ids: this.orden().map(p => p.id) };
+    const pos = new Map(this.ord.ids.map((id, i) => [id, i]));
+    let list = S.premios.filter(p => p.activo).sort((a, b) => (pos.has(a.id) ? pos.get(a.id) : 1e6) - (pos.has(b.id) ? pos.get(b.id) : 1e6) || byName(a, b));
+    if (!$('#rp-q')) {
+      $('#rp-tools').innerHTML = list.length > 12
+        ? `<div class="in-ic rap-search">${ic('search')}<input class="in" id="rp-q" placeholder="Buscar premio" value="${esc(R.q)}" autocomplete="off"></div>` : '';
+    }
+    const q = norm(R.q);
+    if (q) list = list.filter(p => norm(p.nombre + ' ' + p.codigo).includes(q));
+    box.innerHTML = list.length ? `<div class="tiles">${list.map(p => {
+      const n = R.cart[p.id] || 0, dis = p.stock_actual <= 0;
+      return `<div class="tile-w">
+        <button class="tile ${n ? 'on' : ''} ${dis ? 'dis' : ''}" data-add="${p.id}" ${dis ? 'aria-disabled="true"' : ''} aria-label="Sumar ${esc(p.nombre)}">
+          ${p.imagen_url ? `<img class="tile-img" src="${esc(p.imagen_url)}" alt="" loading="lazy">` : ''}
+          <span class="tile-n">${esc(p.nombre)}</span>
+          <span class="tile-s">${dis ? 'Sin stock' : `Quedan <span data-stock="${p.id}">${fNum(p.stock_actual)}</span>`}</span>
+        </button>
+        ${n ? `<span class="tile-c">${n}</span><button class="tile-minus" data-sub="${p.id}" aria-label="Restar ${esc(p.nombre)}">${ic('minus', 's')}</button>` : ''}
+      </div>`;
+    }).join('')}</div>` : `<div class="empty">${ic('search')}<b>No se encontraron premios</b></div>`;
+  },
+  paintBar() {
+    const R = S.rap, bar = $('#rp-bar'); if (!bar) return;
+    const items = Object.entries(R.cart).map(([id, n]) => ({ p: premio(id), n })).filter(i => i.p);
+    const tot = sum(items, i => i.n);
+    if (!R.sector || !S.sectores.length) { bar.innerHTML = `<span class="muted">Elige tu sector para empezar.</span>`; return; }
+    bar.innerHTML = `
+      ${R.nota ? `<input class="in rap-obs" id="rp-obs" placeholder="Nota opcional (ej.: acción en vereda)" value="${esc(R.obs)}" maxlength="200">` : ''}
+      <div class="cart">${tot ? items.map(i => `<button class="cart-i" data-rm="${i.p.id}" title="Quitar">${i.n} × ${esc(i.p.nombre)} ${ic('x', 's')}</button>`).join('')
+        : `<span class="muted small" style="align-self:center">Toca los premios que retiras: cada toque suma 1.</span>`}</div>
+      <div class="rap-acts">
+        <button class="btn icon ${R.nota || R.obs ? 'on-note' : ''}" id="rp-nota" title="Agregar nota" aria-label="Agregar nota">${ic('message-square-text')}</button>
+        ${tot ? `<button class="btn icon" id="rp-clear" title="Vaciar" aria-label="Vaciar">${ic('trash-2')}</button>` : ''}
+        <button class="btn pri lg rap-go" id="rp-go" ${tot ? '' : 'disabled'}>${tot ? `Registrar ${tot}` : 'Registrar'}</button>
+      </div>`;
+  },
+  async submit() {
+    const R = S.rap;
+    const items = Object.entries(R.cart).map(([id, n]) => ({ premio_id: +id, cantidad: n })).filter(i => i.cantidad > 0);
+    if (!items.length || !R.sector) return;
+    const sector = sectorDe(R.sector);
+    await busy($('#rp-go'), async () => {
+      try {
+        const movs = await API.rpc('registrar_retiro_rapido', { p_sector_id: R.sector, p_items: items, p_observacion: (R.obs || '').trim() || null });
+        const lista = Array.isArray(movs) ? movs : [movs];
+        lista.forEach(aplicarMovLocal);
+        const tot = sum(items, i => i.cantidad);
+        const detalle = items.map(i => `${i.cantidad} ${esc((premio(i.premio_id) || {}).nombre || '')}`).join(', ');
+        R.cart = {}; R.obs = ''; R.nota = false;
+        this.paintGrid(); this.paintBar(); icons(); applyFlashes(); updateNavBadge();
+        const ids = lista.map(m => m.id);
+        toast(`<b>Listo: ${tot} premio(s) para ${esc(sectorLabel(sector))}.</b><br>${detalle}`, 'ok', 10000, {
+          label: 'Deshacer',
+          onClick: async () => {
+            try {
+              await API.rpc('deshacer_retiro', { p_ids: ids });
+              lista.forEach(m => {
+                const mm = S.movs.find(x => x.id === m.id); if (mm) mm.estado = 'anulado';
+                const p = premio(m.premio_id); if (p) { flash(p.id, m.cantidad); p.stock_actual += m.cantidad; }
+              });
+              toast('Retiro deshecho. El stock volvió a como estaba.', 'info', 4000);
+              paintCurrent();
+            } catch (er) { toast(esc(errMsg(er)), 'bad', 7000); }
+          }
+        });
+      } catch (e) { toast(esc(errMsg(e)), 'bad', 7000); this.paint(); icons(); }
     });
   }
 };
@@ -1300,8 +1481,9 @@ function filtrarHist() {
     (!f.usuario || m.usuario_id === f.usuario) &&
     (!f.premio || String(m.premio_id) === String(f.premio)) &&
     (!f.tipo || m.tipo === f.tipo) &&
+    (!f.sector || String(m.sector_id) === String(f.sector)) &&
     inRange(m, f.desde, f.hasta) &&
-    (!q || norm(`${m.usuario_nombre} ${pNombre(m)} ${m.observacion || ''} ${TIPOS[m.tipo].t} #${m.id}`).includes(q)));
+    (!q || norm(`${m.usuario_nombre} ${pNombre(m)} ${m.observacion || ''} ${m.sector_nombre || ''} ${TIPOS[m.tipo].t} #${m.id}`).includes(q)));
 }
 function rangoRapido(k) {
   const hoy = new Date(), h = ymd(hoy);
@@ -1326,6 +1508,7 @@ VIEWS.historial = {
             <div class="in-ic">${ic('search')}<input class="in" id="h-q" placeholder="Buscar usuario, premio, observación o N° de movimiento" value="${esc(f.q)}"></div>
             <select class="in" id="h-u" aria-label="Usuario"><option value="">Todos los usuarios</option>${optUsuarios(f.usuario)}</select>
             <select class="in" id="h-p" aria-label="Premio"><option value="">Todos los premios</option>${optPremios(f.premio)}</select>
+            ${S.sectores.length ? `<select class="in" id="h-s" aria-label="Sector"><option value="">Todos los sectores</option>${optSectores(f.sector, true)}</select>` : ''}
             <select class="in" id="h-t" aria-label="Tipo de movimiento"><option value="">Todos los tipos</option>${Object.entries(TIPOS).map(([k, v]) => `<option value="${k}" ${f.tipo === k ? 'selected' : ''}>${v.t}</option>`).join('')}</select>
           </div>
           <div class="toolbar">
@@ -1340,7 +1523,7 @@ VIEWS.historial = {
           </div>
         </div>
         <div class="tbl-wrap"><table class="rt cards">
-          <thead><tr><th>Fecha</th><th>Hora</th><th>Usuario</th><th>Tipo</th><th>Premio</th><th class="n">Cantidad</th><th class="n">Stock anterior</th><th class="n">Stock actual</th><th>Observación</th><th class="n">Acciones</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Hora</th><th>Usuario</th><th>Sector</th><th>Tipo</th><th>Premio</th><th class="n">Cantidad</th><th class="n">Stock anterior</th><th class="n">Stock actual</th><th>Observación</th><th class="n">Acciones</th></tr></thead>
           <tbody id="h-tb"></tbody>
         </table></div>
         <div class="pager" id="h-pg"></div>
@@ -1350,6 +1533,7 @@ VIEWS.historial = {
     $('#h-u').onchange = e => set('usuario', e.target.value);
     $('#h-p').onchange = e => set('premio', e.target.value);
     $('#h-t').onchange = e => set('tipo', e.target.value);
+    if ($('#h-s')) $('#h-s').onchange = e => set('sector', e.target.value);
     $('#h-d').onchange = e => set('desde', e.target.value);
     $('#h-h').onchange = e => set('hasta', e.target.value);
     $('#h-r').onclick = e => {
@@ -1380,6 +1564,7 @@ VIEWS.historial = {
         <td data-label="Fecha" class="tab">${fFecha(m.creado_en)}</td>
         <td data-label="Hora" class="tab">${fHora(m.creado_en)}</td>
         <td data-label="Usuario" class="nw">${esc(m.usuario_nombre)}</td>
+        <td data-label="Sector" class="nw">${m.sector_nombre ? esc(m.sector_nombre) : '<span class="muted">—</span>'}</td>
         <td data-label="Tipo">${badgeTipo(m.tipo)}</td>
         <td data-label="Premio"><span class="pname">${esc(pNombre(m))}</span></td>
         <td data-label="Cantidad" class="n"><span class="${m.delta > 0 ? 'diff-pos' : 'diff-neg'}">${signo(m.delta)}</span>
@@ -1393,7 +1578,7 @@ VIEWS.historial = {
           ${['ingreso', 'salida'].includes(m.tipo) && m.estado !== 'anulado' ? `<button class="btn" data-act="corregir" data-id="${m.id}" title="Corregir cantidad" aria-label="Corregir cantidad">${ic('pencil-line', 's')}</button>` : ''}
           ${['ingreso', 'salida', 'ajuste'].includes(m.tipo) && m.estado !== 'anulado' ? `<button class="btn" data-act="anular" data-id="${m.id}" title="Anular" aria-label="Anular">${ic('ban', 's')}</button>` : ''}
         </div></td>
-      </tr>`).join('') : emptyRow(10, 'No hay movimientos con estos filtros', 'Prueba ampliando el rango de fechas o limpiando los filtros.', 'history');
+      </tr>`).join('') : emptyRow(11, 'No hay movimientos con estos filtros', 'Prueba ampliando el rango de fechas o limpiando los filtros.', 'history');
     $('#h-pg').innerHTML = `<span>${rows.length ? `Mostrando ${f.page * PAGE + 1}–${f.page * PAGE + vis.length} de ${fNum(rows.length)} movimientos` : 'Sin resultados'}</span><span class="sp"></span>
       <button class="btn sm" data-pg="-1" ${f.page === 0 ? 'disabled' : ''}>${ic('chevron-left', 's')}Anterior</button>
       <span>Página ${f.page + 1} de ${pages}</span>
@@ -1412,6 +1597,7 @@ function modalDetalleMov(m) {
       <dt>Cantidad</dt><dd>${signo(m.delta)}</dd>
       <dt>Stock</dt><dd>${fNum(m.stock_anterior)} → ${fNum(m.stock_nuevo)}</dd>
       <dt>Usuario</dt><dd>${esc(m.usuario_nombre)}</dd>
+      ${m.sector_nombre ? `<dt>Sector</dt><dd>${esc(m.sector_nombre)}</dd>` : ''}
       <dt>Fecha y hora</dt><dd>${fFH(m.creado_en)}</dd>
       <dt>Observación</dt><dd>${esc(m.observacion || '—')}</dd>
       <dt>Estado</dt><dd>${estadoMovTxt(m)}</dd>
@@ -1679,6 +1865,8 @@ VIEWS.reportes = {
         <div class="panel"><div class="panel-h"><h2>Premios menos utilizados</h2><span class="sp"></span>${expBtns('low')}</div>
           <div class="tbl-wrap" style="margin-top:8px"><table class="rt"><thead><tr><th>Premio</th><th class="n">Unidades</th><th class="n">Stock actual</th><th>Último retiro</th></tr></thead><tbody id="r-low"></tbody></table></div></div>
       </div>
+      <div class="panel mt"><div class="panel-h"><h2>Salidas por sector</h2><span class="sp"></span>${expBtns('sec')}</div>
+        <div class="tbl-wrap" style="margin-top:8px"><table class="rt cards"><thead><tr><th>Sector</th><th class="n">Retiros</th><th class="n">Unidades</th><th class="n">% del total</th><th>Premio que más retiró</th><th>Personas</th></tr></thead><tbody id="r-sec"></tbody></table></div></div>
       <div class="panel mt"><div class="panel-h"><h2>Usuarios que más premios retiraron</h2><span class="sp"></span>${expBtns('usr')}</div>
         <div class="tbl-wrap" style="margin-top:8px"><table class="rt cards"><thead><tr><th>Usuario</th><th class="n">Retiros</th><th class="n">Unidades</th><th>Premio que más retiró</th><th>Último retiro</th></tr></thead><tbody id="r-usr"></tbody></table></div></div>
       <div class="cols-2e mt">
@@ -1706,6 +1894,7 @@ VIEWS.reportes = {
     bindExp(el, 'per', () => ({ base: 'salidas_por_periodo', title: `Salidas por ${f.agrupar} (${rango()})`, cols: [{ h: 'Período', v: r => r.label }, { h: 'Unidades', v: r => r.unidades }, { h: 'Retiros', v: r => r.retiros }], rows: this.data.periodos }));
     bindExp(el, 'top', () => ({ base: 'premios_mas_entregados', title: `Premios más entregados (${rango()})`, cols: this.colsPremio(), rows: this.data.top }));
     bindExp(el, 'low', () => ({ base: 'premios_menos_utilizados', title: `Premios menos utilizados (${rango()})`, cols: this.colsPremio(), rows: this.data.low }));
+    bindExp(el, 'sec', () => ({ base: 'salidas_por_sector', title: `Salidas por sector (${rango()})`, cols: this.colsSec(), rows: this.data.sec }));
     bindExp(el, 'usr', () => ({ base: 'retiros_por_usuario', title: `Retiros por usuario (${rango()})`, cols: this.colsUsr(), rows: this.data.usr }));
     bindExp(el, 'hp', () => ({ base: 'historial_premio', title: `Historial de ${(premio(f.premio) || {}).nombre || 'premio'} (${rango()})`, cols: MOV_COLS, rows: this.data.hp }));
     bindExp(el, 'hu', () => ({ base: 'historial_usuario', title: `Historial de ${(perfilDe(f.usuario) || {}).nombre_completo || 'usuario'} (${rango()})`, cols: MOV_COLS, rows: this.data.hu }));
@@ -1713,6 +1902,7 @@ VIEWS.reportes = {
       { title: 'Salidas por período', cols: [{ h: 'Período', v: r => r.label }, { h: 'Unidades', v: r => r.unidades }, { h: 'Retiros', v: r => r.retiros }], rows: this.data.periodos },
       { title: 'Más entregados', cols: this.colsPremio(), rows: this.data.top },
       { title: 'Menos utilizados', cols: this.colsPremio(), rows: this.data.low },
+      { title: 'Por sector', cols: this.colsSec(), rows: this.data.sec },
       { title: 'Por usuario', cols: this.colsUsr(), rows: this.data.usr },
       { title: 'Stock actual', cols: [{ h: 'Código', v: p => p.codigo }, { h: 'Premio', v: p => p.nombre }, { h: 'Categoría', v: p => catName(p.categoria_id) }, { h: 'Stock actual', v: p => p.stock_actual }, { h: 'Stock mínimo', v: p => p.stock_minimo }, { h: 'Estado', v: p => p.activo ? ESTADOS[estadoDe(p)].t : 'Desactivado' }], rows: S.premios },
       { title: 'Movimientos del período', cols: MOV_COLS, rows: S.movs.filter(m => inRange(m, f.desde, f.hasta)) }
@@ -1720,6 +1910,7 @@ VIEWS.reportes = {
     this.paint();
   },
   colsPremio: () => [{ h: 'Premio', v: r => r.p.nombre }, { h: 'Categoría', v: r => catName(r.p.categoria_id) }, { h: 'Unidades', v: r => r.unidades }, { h: 'Retiros', v: r => r.retiros }, { h: 'Stock actual', v: r => r.p.stock_actual }, { h: 'Último retiro', v: r => r.ultimo ? fFH(r.ultimo) : 'Nunca' }],
+  colsSec: () => [{ h: 'Sector', v: r => r.nombre }, { h: 'Retiros', v: r => r.retiros }, { h: 'Unidades', v: r => r.unidades }, { h: '% del total', v: r => r.pct }, { h: 'Premio que más retiró', v: r => r.fav }, { h: 'Personas', v: r => r.personas }],
   colsUsr: () => [{ h: 'Usuario', v: r => r.nombre }, { h: 'Retiros', v: r => r.retiros }, { h: 'Unidades', v: r => r.unidades }, { h: 'Premio que más retiró', v: r => r.fav }, { h: 'Último retiro', v: r => fFH(r.ultimo) }],
   paint() {
     if (!$('#r-top')) return;
@@ -1760,6 +1951,21 @@ VIEWS.reportes = {
     $('#r-low').innerHTML = low.length ? low.map(r => `<tr><td><span class="pname">${esc(r.p.nombre)}</span></td><td class="n strong num">${fNum(r.unidades)}</td><td class="n num">${fNum(r.p.stock_actual)}</td><td class="muted">${r.ultimo ? rel(r.ultimo) : 'Nunca en el período'}</td></tr>`).join('')
       : emptyRow(4, 'No hay premios activos', '', 'gift');
 
+    // por sector
+    const porS = new Map();
+    sal.forEach(m => {
+      const k = m.sector_id || 0;
+      const r = porS.get(k) || { nombre: m.sector_nombre || 'Sin sector', retiros: 0, unidades: 0, pp: {}, us: new Set() };
+      r.retiros++; r.unidades += qtyEf(m); r.pp[m.premio_id] = (r.pp[m.premio_id] || 0) + qtyEf(m); r.us.add(m.usuario_nombre);
+      porS.set(k, r);
+    });
+    const sec = [...porS.values()].map(r => {
+      const fav = Object.entries(r.pp).sort((a, b) => b[1] - a[1])[0];
+      return { ...r, pct: totU ? Math.round(r.unidades / totU * 1000) / 10 : 0, fav: fav ? `${(premio(fav[0]) || {}).nombre || '—'} (${fav[1]})` : '—', personas: [...r.us].join(', ') };
+    }).sort((a, b) => b.unidades - a.unidades);
+    $('#r-sec').innerHTML = sec.length ? sec.map(r => `<tr><td class="main-cell" data-label="Sector"><b>${esc(r.nombre)}</b></td><td data-label="Retiros" class="n num">${fNum(r.retiros)}</td><td data-label="Unidades" class="n strong num">${fNum(r.unidades)}</td><td data-label="% del total" class="n num">${String(r.pct).replace('.', ',')}%</td><td data-label="Premio que más retiró">${esc(r.fav)}</td><td data-label="Personas" class="muted">${esc(trunc(r.personas, 60))}</td></tr>`).join('')
+      : emptyRow(6, 'Sin retiros en el período', '', 'zap');
+
     // por usuario
     const porU = new Map();
     sal.forEach(m => {
@@ -1779,7 +1985,7 @@ VIEWS.reportes = {
     $('#r-hp').innerHTML = !f.premio ? emptyRow(5, 'Elige un premio', '', 'gift') : hp.length ? hp.map(m => fila(m, 'u')).join('') : emptyRow(5, 'Sin movimientos en el período', '', 'history');
     $('#r-hu').innerHTML = !f.usuario ? emptyRow(5, 'Elige un usuario', '', 'user-round') : hu.length ? hu.map(m => fila(m, 'p')).join('') : emptyRow(5, 'Sin movimientos en el período', '', 'history');
 
-    this.data = { periodos, top, low: low, usr, hp, hu };
+    this.data = { periodos, top, low: low, usr, hp, hu, sec };
   }
 };
 
@@ -2118,7 +2324,10 @@ VIEWS.configuracion = {
         </div>
         ${admin ? `<div class="panel" style="align-self:start"><div class="panel-h"><h2>Categorías de premios</h2></div><div class="panel-b">
           <form class="row" id="c-catf" style="flex-wrap:nowrap;margin-bottom:8px"><input class="in" id="c-catn" placeholder="Nueva categoría"><button class="btn pri">${ic('plus', 's')}Agregar</button></form>
-          <div id="c-cats"></div></div></div>` : `<div class="panel" style="align-self:start"><div class="panel-h"><h2>Tu cuenta</h2></div><div class="panel-b">
+          <div id="c-cats"></div></div>
+          <div class="panel-h" style="border-top:1px solid var(--line);padding-top:16px"><h2>Sectores</h2><span class="sub">Para el retiro rápido</span></div><div class="panel-b">
+          <form class="row" id="c-secf" style="flex-wrap:nowrap;margin-bottom:8px"><input class="in" id="c-secn" placeholder="Nuevo sector"><input class="in" id="c-secg" placeholder="Grupo (opcional)" style="max-width:150px"><button class="btn pri">${ic('plus', 's')}Agregar</button></form>
+          <div id="c-secs"></div></div></div>` : `<div class="panel" style="align-self:start"><div class="panel-h"><h2>Tu cuenta</h2></div><div class="panel-b">
           <dl class="kv"><dt>Nombre</dt><dd>${esc(S.perfil.nombre_completo)}</dd><dt>Usuario</dt><dd>${esc(S.perfil.usuario)}</dd><dt>Rol</dt><dd>Usuario</dd></dl>
           <p class="muted small">Para cambiar tu nombre o rol, consulta con un administrador.</p></div></div>`}
       </div>`;
@@ -2163,9 +2372,37 @@ VIEWS.configuracion = {
         catch (err) { toast(esc(errMsg(err)), 'bad'); }
       }
     };
+    if ($('#c-secf')) {
+      $('#c-secf').onsubmit = async e => {
+        e.preventDefault();
+        const n = $('#c-secn').value.trim(), g = $('#c-secg').value.trim(); if (!n) return;
+        try { S.sectores.push(await API.crearSector({ nombre: n, grupo: g || null, orden: S.sectores.length + 1 })); $('#c-secn').value = ''; $('#c-secg').value = ''; this.paint(); icons(); toast('Sector agregado.', 'ok'); }
+        catch (err) { toast(esc(/sectores_nombre_key/.test(err.message || '') ? 'Ya existe un sector con ese nombre.' : errMsg(err)), 'bad'); }
+      };
+      $('#c-secs').onclick = async e => {
+        const b = e.target.closest('[data-sec-id]'); if (!b) return;
+        const x = S.sectores.find(y => y.id === +b.dataset.secId);
+        if (b.dataset.a === 'tog') {
+          try { Object.assign(x, await API.editarSector(x.id, { activo: !x.activo })); this.paint(); icons(); toast(x.activo ? 'Sector activado.' : 'Sector desactivado. Su historial se conserva.', 'ok'); }
+          catch (err) { toast(esc(errMsg(err)), 'bad'); }
+        } else {
+          const md = modal({ title: 'Editar sector', body: `<div class="stack"><div class="field"><label for="sx-n">Nombre</label><input class="in" id="sx-n" value="${esc(x.nombre)}"></div><div class="field"><label for="sx-g">Grupo (opcional)</label><input class="in" id="sx-g" value="${esc(x.grupo || '')}"><span class="hint">Ej.: "Salón" para agrupar Recepción, Pretest y Full test.</span></div><div class="field"><label for="sx-o">Orden en pantalla</label><input class="in num" id="sx-o" type="number" value="${x.orden}" style="max-width:120px"></div></div>`, foot: `<button class="btn" data-close>Cancelar</button><button class="btn pri" id="sx-s">Guardar</button>` });
+          md.$('#sx-s').onclick = () => busy(md.$('#sx-s'), async () => {
+            const n = md.$('#sx-n').value.trim(); if (!n) return;
+            try { Object.assign(x, await API.editarSector(x.id, { nombre: n, grupo: md.$('#sx-g').value.trim() || null, orden: parseInt(md.$('#sx-o').value, 10) || 0 })); md.close(); this.paint(); icons(); toast('Sector actualizado.', 'ok'); }
+            catch (err) { toast(esc(errMsg(err)), 'bad'); }
+          });
+        }
+      };
+    }
     this.paint();
   },
   paint() {
+    const sb = $('#c-secs');
+    if (sb) sb.innerHTML = S.sectores.length ? S.sectores.slice().sort((a, b) => a.orden - b.orden).map(x => `<div class="cat-row" style="${x.activo ? '' : 'opacity:.55'}"><span style="flex:1">${esc(sectorLabel(x))}</span>${x.activo ? '' : '<span class="badge mute">Inactivo</span>'}
+      <button class="btn sm ghost icon" data-sec-id="${x.id}" data-a="ed" title="Editar" aria-label="Editar">${ic('pencil', 's')}</button>
+      <button class="btn sm ghost icon" data-sec-id="${x.id}" data-a="tog" title="${x.activo ? 'Desactivar' : 'Activar'}" aria-label="${x.activo ? 'Desactivar' : 'Activar'}">${ic(x.activo ? 'eye-off' : 'eye', 's')}</button></div>`).join('')
+      : `<div class="callout warn">${ic('triangle-alert', 's')}<span>Ejecuta <b>migracion_02_retiro_rapido.sql</b> en Supabase para habilitar los sectores.</span></div>`;
     const box = $('#c-cats'); if (!box) return;
     box.innerHTML = S.categorias.length ? S.categorias.map(c => `<div class="cat-row"><span class="grow" style="flex:1">${esc(c.nombre)}</span><span class="muted small">${S.premios.filter(p => p.categoria_id === c.id).length} premio(s)</span>
       <button class="btn sm ghost icon" data-cat="${c.id}" data-a="ren" title="Renombrar" aria-label="Renombrar">${ic('pencil', 's')}</button>
@@ -2232,12 +2469,16 @@ function onChange(table, p) {
   if (table === 'premios') {
     if (ev === 'DELETE') S.premios = S.premios.filter(x => x.id !== o.id);
     else upsertPremioLocal(n);
+    const c = S.rap.cart;
+    S.premios.forEach(p => { if (c[p.id] > p.stock_actual) { if (p.stock_actual > 0) c[p.id] = p.stock_actual; else delete c[p.id]; } });
   } else if (table === 'movimientos') {
     const i = S.movs.findIndex(m => m.id === n.id);
     if (ev === 'INSERT' && i < 0) { S.movs.unshift(n); S.movs.sort((a, b) => b.id - a.id); }
     else if (ev === 'UPDATE' && i >= 0) S.movs[i] = n;
   } else if (table === 'alertas' && ev === 'INSERT') {
     if (!S.alertas.some(a => a.id === n.id)) { S.alertas.unshift(n); toastAlerta(n); updateBell(); }
+  } else if (table === 'sectores') {
+    API.sectores().then(x => { S.sectores = x; paintCurrent(); }).catch(() => {});
   } else if (table === 'categorias') {
     API.categorias().then(c => { S.categorias = c; paintCurrent(); }).catch(() => {});
   } else if (table === 'configuracion' && n && n.clave) {
