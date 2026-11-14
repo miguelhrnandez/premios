@@ -123,6 +123,10 @@ const perfilDe = id => S.perfiles.find(p => p.id === id);
 const estadoDe = p => p.stock_actual <= 0 ? 'agotado' : (p.stock_actual <= p.stock_minimo ? 'bajo' : 'ok');
 const qtyEf = m => m.estado === 'anulado' ? 0 : (m.cantidad_corregida ?? m.cantidad);
 const salidasVig = (arr = S.movs) => arr.filter(m => m.tipo === 'salida' && m.estado !== 'anulado');
+// faltantes: ajustes (inventario o manuales) que bajaron stock → salidas "sin identificar"
+const faltantes = (arr = S.movs) => arr.filter(m => m.tipo === 'ajuste' && m.estado !== 'anulado' && m.delta < 0);
+const uFalt = m => -m.delta;
+const SIN_ID = 'Sin identificar';
 const ingresosVig = (arr = S.movs) => arr.filter(m => m.tipo === 'ingreso' && m.estado !== 'anulado');
 const inRange = (m, desde, hasta) => { const d = ymd(m.creado_en); return (!desde || d >= desde) && (!hasta || d <= hasta); };
 const byName = (a, b) => a.nombre.localeCompare(b.nombre, 'es');
@@ -848,7 +852,7 @@ function destroyCharts() { S.charts.forEach(c => { try { c.destroy(); } catch (e
 function chartColors() {
   const cs = getComputedStyle(document.documentElement);
   const g = v => cs.getPropertyValue(v).trim();
-  return { s1: g('--series-1'), s2: g('--series-2'), grid: g('--line'), text: g('--muted'), ink: g('--ink-2'), tipBg: g('--surface'), tipInk: g('--ink') };
+  return { s1: g('--series-1'), s2: g('--series-2'), s3: g('--series-3'), grid: g('--line'), text: g('--muted'), ink: g('--ink-2'), tipBg: g('--surface'), tipInk: g('--ink') };
 }
 function chartOpts(c, legend) {
   const FAM = "Onest, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
@@ -1058,7 +1062,8 @@ VIEWS.dashboard = {
         type: 'bar',
         data: { labels: [], datasets: [
           { label: 'Ingresos', data: [], backgroundColor: c.s1, borderRadius: 4, maxBarThickness: 16, categoryPercentage: .72, barPercentage: .86 },
-          { label: 'Salidas', data: [], backgroundColor: c.s2, borderRadius: 4, maxBarThickness: 16, categoryPercentage: .72, barPercentage: .86 }
+          { label: 'Salidas', data: [], backgroundColor: c.s2, borderRadius: 4, maxBarThickness: 16, categoryPercentage: .72, barPercentage: .86 },
+          { label: 'Faltantes sin identificar', data: [], backgroundColor: c.s3, borderRadius: 4, maxBarThickness: 16, categoryPercentage: .72, barPercentage: .86 }
         ] },
         options: chartOpts(c, true)
       });
@@ -1080,15 +1085,19 @@ VIEWS.dashboard = {
     const sal = salidasVig();
     const sHoy = sum(sal.filter(m => ymd(m.creado_en) === hoy), qtyEf);
     const sMes = sum(sal.filter(m => ymd(m.creado_en).startsWith(mes)), qtyEf);
+    const fal = admin ? faltantes() : [];
+    const fHoy = sum(fal.filter(m => ymd(m.creado_en) === hoy), uFalt);
+    const fMes = sum(fal.filter(m => ymd(m.creado_en).startsWith(mes)), uFalt);
     const inact = S.premios.length - act.length;
     const quien = admin ? 'por todo el equipo' : 'por ti';
+    const detalle = (r, f) => f ? `${fNum(r)} registrados + ${fNum(f)} sin identificar` : `Unidades ${quien}`;
     $('#d-kpis').innerHTML = `
       <div class="kpi"><span class="kpi-l">${ic('gift', 's')}Tipos de premios</span><span class="kpi-v">${fNum(act.length)}</span><span class="kpi-s">${inact ? `${inact} desactivado(s)` : 'Activos'}</span></div>
       <div class="kpi"><span class="kpi-l">${ic('boxes', 's')}Unidades en stock</span><span class="kpi-v">${fNum(sum(act, p => p.stock_actual))}</span><span class="kpi-s">Total disponible</span></div>
       <button class="kpi ${bajo.length ? 'warn' : ''}" data-kpi="bajo"><span class="kpi-l">${ic('triangle-alert', 's')}Stock bajo</span><span class="kpi-v">${fNum(bajo.length)}</span><span class="kpi-s">En el mínimo o por debajo</span></button>
       <button class="kpi ${agot.length ? 'bad' : ''}" data-kpi="agotado"><span class="kpi-l">${ic('octagon-alert', 's')}Agotados</span><span class="kpi-v">${fNum(agot.length)}</span><span class="kpi-s">Sin unidades</span></button>
-      <div class="kpi"><span class="kpi-l">${ic('package-minus', 's')}Retirados hoy</span><span class="kpi-v">${fNum(sHoy)}</span><span class="kpi-s">Unidades ${quien}</span></div>
-      <div class="kpi"><span class="kpi-l">${ic('calendar', 's')}Retirados este mes</span><span class="kpi-v">${fNum(sMes)}</span><span class="kpi-s">Unidades ${quien}</span></div>`;
+      <div class="kpi"><span class="kpi-l">${ic('package-minus', 's')}Retirados hoy</span><span class="kpi-v">${fNum(sHoy + fHoy)}</span><span class="kpi-s">${detalle(sHoy, fHoy)}</span></div>
+      <div class="kpi"><span class="kpi-l">${ic('calendar', 's')}Retirados este mes</span><span class="kpi-v">${fNum(sMes + fMes)}</span><span class="kpi-s">${detalle(sMes, fMes)}</span></div>`;
 
     // alertas de stock (estado actual)
     const alertas = [...agot, ...bajo.sort((a, b) => a.stock_actual - b.stock_actual)];
@@ -1117,6 +1126,7 @@ VIEWS.dashboard = {
     // hoy por sector
     const ps = {};
     sal.filter(m => ymd(m.creado_en) === hoy).forEach(m => { const k = m.sector_nombre || 'Sin sector'; ps[k] = (ps[k] || 0) + qtyEf(m); });
+    if (fHoy) ps[SIN_ID] = (ps[SIN_ID] || 0) + fHoy;
     const psl = Object.entries(ps).sort((a, b) => b[1] - a[1]);
     const psm = psl.length ? psl[0][1] : 1;
     $('#d-sec').innerHTML = psl.length ? psl.map(([k, n]) => `<div class="hbar"><span class="nm">${esc(k)}</span><span class="tr"><i style="width:${(n / psm * 100).toFixed(1)}%"></i></span><span class="num strong">${fNum(n)}</span></div>`).join('')
@@ -1133,17 +1143,20 @@ VIEWS.dashboard = {
 
     // gráfico 14 días
     if (this.chart) {
-      const labels = [], ing = [], sa = [];
+      const labels = [], ing = [], sa = [], fa = [];
       for (let i = 13; i >= 0; i--) {
         const d = new Date(); d.setDate(d.getDate() - i);
         const k = ymd(d);
         labels.push(d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }));
         ing.push(sum(ingresosVig().filter(m => ymd(m.creado_en) === k), qtyEf));
         sa.push(sum(sal.filter(m => ymd(m.creado_en) === k), qtyEf));
+        fa.push(sum(fal.filter(m => ymd(m.creado_en) === k), uFalt));
       }
       this.chart.data.labels = labels;
       this.chart.data.datasets[0].data = ing;
       this.chart.data.datasets[1].data = sa;
+      this.chart.data.datasets[2].data = fa;
+      this.chart.data.datasets[2].hidden = !fa.some(Boolean);
       this.chart.update('none');
     }
   }
@@ -2577,8 +2590,11 @@ VIEWS.reportes = {
     const c = chartColors();
     this.chart = makeChart($('#r-chart'), {
       type: 'bar',
-      data: { labels: [], datasets: [{ label: 'Unidades retiradas', data: [], backgroundColor: c.s2, borderRadius: 4, maxBarThickness: 28, categoryPercentage: .8, barPercentage: .9 }] },
-      options: chartOpts(c, false)
+      data: { labels: [], datasets: [
+        { label: 'Retiros registrados', data: [], backgroundColor: c.s2, borderRadius: 4, maxBarThickness: 28, categoryPercentage: .8, barPercentage: .9, stack: 's' },
+        { label: 'Faltantes sin identificar', data: [], backgroundColor: c.s3, borderRadius: 4, maxBarThickness: 28, categoryPercentage: .8, barPercentage: .9, stack: 's' }
+      ] },
+      options: (() => { const o = chartOpts(c, false); o.scales.x.stacked = true; o.scales.y.stacked = true; return o; })()
     });
     const rp = () => { this.paint(); icons(); };
     $('#r-d').onchange = e => { f.desde = e.target.value; rp(); };
@@ -2588,7 +2604,7 @@ VIEWS.reportes = {
     $('#r-p').onchange = e => { f.premio = e.target.value; rp(); };
     $('#r-u').onchange = e => { f.usuario = e.target.value; rp(); };
     const rango = () => `${f.desde ? fFecha(parseYmd(f.desde)) : 'inicio'} al ${f.hasta ? fFecha(parseYmd(f.hasta)) : 'hoy'}`;
-    bindExp(el, 'per', () => ({ base: 'salidas_por_periodo', title: `Salidas por ${f.agrupar} (${rango()})`, cols: [{ h: 'Período', v: r => r.label }, { h: 'Unidades', v: r => r.unidades }, { h: 'Retiros', v: r => r.retiros }], rows: this.data.periodos }));
+    bindExp(el, 'per', () => ({ base: 'salidas_por_periodo', title: `Salidas por ${f.agrupar} (${rango()})`, cols: [{ h: 'Período', v: r => r.label }, { h: 'Registradas', v: r => r.registradas }, { h: 'Sin identificar', v: r => r.sinId }, { h: 'Total unidades', v: r => r.unidades }, { h: 'Retiros', v: r => r.retiros }], rows: this.data.periodos }));
     bindExp(el, 'top', () => ({ base: 'premios_mas_entregados', title: `Premios más entregados (${rango()})`, cols: this.colsPremio(), rows: this.data.top }));
     bindExp(el, 'low', () => ({ base: 'premios_menos_utilizados', title: `Premios menos utilizados (${rango()})`, cols: this.colsPremio(), rows: this.data.low }));
     bindExp(el, 'sec', () => ({ base: 'salidas_por_sector', title: `Salidas por sector (${rango()})`, cols: this.colsSec(), rows: this.data.sec }));
@@ -2596,7 +2612,7 @@ VIEWS.reportes = {
     bindExp(el, 'hp', () => ({ base: 'historial_premio', title: `Historial de ${(premio(f.premio) || {}).nombre || 'premio'} (${rango()})`, cols: MOV_COLS, rows: this.data.hp }));
     bindExp(el, 'hu', () => ({ base: 'historial_usuario', title: `Historial de ${(perfilDe(f.usuario) || {}).nombre_completo || 'usuario'} (${rango()})`, cols: MOV_COLS, rows: this.data.hu }));
     $('#r-all').onclick = () => exportarLibro('reporte_premios', [
-      { title: 'Salidas por período', cols: [{ h: 'Período', v: r => r.label }, { h: 'Unidades', v: r => r.unidades }, { h: 'Retiros', v: r => r.retiros }], rows: this.data.periodos },
+      { title: 'Salidas por período', cols: [{ h: 'Período', v: r => r.label }, { h: 'Registradas', v: r => r.registradas }, { h: 'Sin identificar', v: r => r.sinId }, { h: 'Total unidades', v: r => r.unidades }, { h: 'Retiros', v: r => r.retiros }], rows: this.data.periodos },
       { title: 'Más entregados', cols: this.colsPremio(), rows: this.data.top },
       { title: 'Menos utilizados', cols: this.colsPremio(), rows: this.data.low },
       { title: 'Por sector', cols: this.colsSec(), rows: this.data.sec },
@@ -2614,12 +2630,12 @@ VIEWS.reportes = {
     const f = S.f.rep;
     $$('#r-g .chip').forEach(c => c.classList.toggle('on', c.dataset.g === f.agrupar));
     const enR = S.movs.filter(m => inRange(m, f.desde, f.hasta));
-    const sal = salidasVig(enR), ing = ingresosVig(enR);
-    const totU = sum(sal, qtyEf);
+    const sal = salidasVig(enR), ing = ingresosVig(enR), fal = faltantes(enR);
+    const totR = sum(sal, qtyEf), totF = sum(fal, uFalt), totU = totR + totF;
 
     // KPIs del período
     $('#r-kpis').innerHTML = `
-      <div class="kpi"><span class="kpi-l">Unidades entregadas</span><span class="kpi-v">${fNum(totU)}</span><span class="kpi-s">${fNum(sal.length)} retiros</span></div>
+      <div class="kpi"><span class="kpi-l">Salidas totales</span><span class="kpi-v">${fNum(totU)}</span><span class="kpi-s">${fNum(totR)} registradas (${fNum(sal.length)} retiros)${totF ? ` + ${fNum(totF)} sin identificar` : ''}</span></div>
       <div class="kpi"><span class="kpi-l">Unidades ingresadas</span><span class="kpi-v">${fNum(sum(ing, qtyEf))}</span><span class="kpi-s">${fNum(ing.length)} ingresos</span></div>
       <div class="kpi"><span class="kpi-l">Ajustes</span><span class="kpi-v">${fNum(enR.filter(m => m.tipo === 'ajuste' && m.estado !== 'anulado').length)}</span><span class="kpi-s">Diferencia neta ${signo(sum(enR.filter(m => m.tipo === 'ajuste' && m.estado !== 'anulado'), m => m.delta))}</span></div>
       <div class="kpi"><span class="kpi-l">Personas que retiraron</span><span class="kpi-v">${fNum(new Set(sal.map(m => m.usuario_id || m.usuario_nombre)).size)}</span><span class="kpi-s">En el período</span></div>`;
@@ -2632,10 +2648,19 @@ VIEWS.reportes = {
     const mapa = new Map();
     const ini = f.desde ? parseYmd(f.desde) : (sal.length ? new Date(sal[sal.length - 1].creado_en) : new Date());
     const fin = f.hasta ? parseYmd(f.hasta) : new Date();
-    for (let d = new Date(ini), i = 0; d <= fin && i < 1500; d.setDate(d.getDate() + 1), i++) { const k = key(d); if (!mapa.has(k)) mapa.set(k, { label: lab(k), unidades: 0, retiros: 0 }); }
-    sal.forEach(m => { const k = key(new Date(m.creado_en)); if (!mapa.has(k)) mapa.set(k, { label: lab(k), unidades: 0, retiros: 0 }); const r = mapa.get(k); r.unidades += qtyEf(m); r.retiros++; });
+    const nuevo = k => ({ label: lab(k), registradas: 0, sinId: 0, unidades: 0, retiros: 0 });
+    for (let d = new Date(ini), i = 0; d <= fin && i < 1500; d.setDate(d.getDate() + 1), i++) { const k = key(d); if (!mapa.has(k)) mapa.set(k, nuevo(k)); }
+    sal.forEach(m => { const k = key(new Date(m.creado_en)); if (!mapa.has(k)) mapa.set(k, nuevo(k)); const r = mapa.get(k); r.registradas += qtyEf(m); r.unidades += qtyEf(m); r.retiros++; });
+    fal.forEach(m => { const k = key(new Date(m.creado_en)); if (!mapa.has(k)) mapa.set(k, nuevo(k)); const r = mapa.get(k); r.sinId += uFalt(m); r.unidades += uFalt(m); });
     const periodos = [...mapa.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(e => e[1]);
-    if (this.chart) { this.chart.data.labels = periodos.map(p => p.label); this.chart.data.datasets[0].data = periodos.map(p => p.unidades); this.chart.update('none'); }
+    if (this.chart) {
+      this.chart.data.labels = periodos.map(p => p.label);
+      this.chart.data.datasets[0].data = periodos.map(p => p.registradas);
+      this.chart.data.datasets[1].data = periodos.map(p => p.sinId);
+      this.chart.data.datasets[1].hidden = !totF;
+      this.chart.options.plugins.legend.display = !!totF;
+      this.chart.update('none');
+    }
 
     // por premio
     const porP = new Map(S.premios.map(p => [p.id, { p, unidades: 0, retiros: 0, ultimo: null }]));
@@ -2643,7 +2668,7 @@ VIEWS.reportes = {
     const lista = [...porP.values()];
     const top = lista.filter(r => r.unidades > 0).sort((a, b) => b.unidades - a.unidades).slice(0, 10);
     const low = lista.filter(r => r.p.activo).sort((a, b) => a.unidades - b.unidades || byName(a.p, b.p)).slice(0, 10);
-    $('#r-top').innerHTML = top.length ? top.map((r, i) => `<tr><td class="muted">${i + 1}</td><td><span class="pname">${esc(r.p.nombre)}</span><div class="pcode">${esc(catName(r.p.categoria_id))}</div></td><td class="n strong num">${fNum(r.unidades)}</td><td class="n num">${fNum(r.retiros)}</td><td class="n num">${totU ? (r.unidades / totU * 100).toFixed(1).replace('.', ',') : 0}%</td></tr>`).join('')
+    $('#r-top').innerHTML = top.length ? top.map((r, i) => `<tr><td class="muted">${i + 1}</td><td><span class="pname">${esc(r.p.nombre)}</span><div class="pcode">${esc(catName(r.p.categoria_id))}</div></td><td class="n strong num">${fNum(r.unidades)}</td><td class="n num">${fNum(r.retiros)}</td><td class="n num">${totR ? (r.unidades / totR * 100).toFixed(1).replace('.', ',') : 0}%</td></tr>`).join('')
       : emptyRow(5, 'Sin retiros en el período', '', 'chart-column');
     $('#r-low').innerHTML = low.length ? low.map(r => `<tr><td><span class="pname">${esc(r.p.nombre)}</span></td><td class="n strong num">${fNum(r.unidades)}</td><td class="n num">${fNum(r.p.stock_actual)}</td><td class="muted">${r.ultimo ? rel(r.ultimo) : 'Nunca en el período'}</td></tr>`).join('')
       : emptyRow(4, 'No hay premios activos', '', 'gift');
@@ -2656,6 +2681,11 @@ VIEWS.reportes = {
       r.retiros++; r.unidades += qtyEf(m); r.pp[m.premio_id] = (r.pp[m.premio_id] || 0) + qtyEf(m); r.us.add(m.usuario_nombre);
       porS.set(k, r);
     });
+    if (fal.length) {
+      const r = { nombre: SIN_ID, retiros: 0, unidades: 0, pp: {}, us: new Set(['Faltantes de inventario']) };
+      fal.forEach(m => { r.retiros++; r.unidades += uFalt(m); r.pp[m.premio_id] = (r.pp[m.premio_id] || 0) + uFalt(m); });
+      porS.set('sin-id', r);
+    }
     const sec = [...porS.values()].map(r => {
       const fav = Object.entries(r.pp).sort((a, b) => b[1] - a[1])[0];
       return { ...r, pct: totU ? Math.round(r.unidades / totU * 1000) / 10 : 0, fav: fav ? `${(premio(fav[0]) || {}).nombre || '—'} (${fav[1]})` : '—', personas: [...r.us].join(', ') };

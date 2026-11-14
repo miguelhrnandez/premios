@@ -28,6 +28,7 @@
 
   --series-1: #2a78d6;
   --series-2: #eb6834;
+  --series-3: #1baf7a;
 
   --r-s: 6px; --r-m: 10px; --r-l: 14px;
   --shadow-pop: 0 12px 32px rgba(15, 25, 45, .16), 0 2px 6px rgba(15, 25, 45, .08);
@@ -59,6 +60,7 @@
 
   --series-1: #3987e5;
   --series-2: #d95926;
+  --series-3: #199e70;
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, .5);
 }
 
