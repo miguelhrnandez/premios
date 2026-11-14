@@ -610,3 +610,18 @@ body.modo-pub .rap-bar { left: 0; }
 .quien label { font-weight: 600; font-size: 15px; }
 .quien-sel { height: 50px; font-size: 17px; font-weight: 600; }
 .quien-sel.falta { border-color: var(--low-dot); box-shadow: 0 0 0 3px var(--low-bg); }
+
+/* barra del retiro: "Vaciar" separado de "Registrar" */
+.cart-row { display: flex; gap: 10px; align-items: center; flex: 1 1 260px; min-width: 0; }
+.rap-clear { flex: none; color: var(--out); border-color: transparent; }
+.rap-clear:hover { background: var(--out-bg); }
+.rap-acts { gap: 12px; }
+@media (max-width: 640px) {
+  .cart-row { flex: 1 1 100%; }
+  .rap-acts { justify-content: flex-end; }
+}
+@media (max-width: 640px) {
+  .rap-bar { row-gap: 14px; }
+  .rap-acts { justify-content: space-between; }
+  .rap-go { flex: 0 0 62%; min-width: 0; }
+}
