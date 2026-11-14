@@ -171,6 +171,7 @@ function fraseMov(m) {
 }
 function errMsg(e) {
   const m = (e && (e.message || e.error_description || e.msg)) || String(e);
+  if (/LINK_INVALIDO/.test(m)) return 'El link de retiros ya no es válido. Pide el nuevo a tu jefe.';
   if (/Invalid login credentials/i.test(m)) return 'Usuario o contraseña incorrectos.';
   if (/Email not confirmed/i.test(m)) return 'El usuario todavía no está confirmado. Un administrador debe activarlo.';
   if (/already registered|already been registered|User already/i.test(m)) return 'Ese nombre de usuario ya existe.';
@@ -268,6 +269,7 @@ async function boot() {
     }
   } catch (e) { /* ignorar */ }
 
+  leerCodigoDeURL();
   if (window.__API_MOCK__) {
     API = window.__API_MOCK__;
   } else {
@@ -279,11 +281,12 @@ async function boot() {
   }
   let session = null;
   try { session = await API.getSession(); } catch (e) { /* sin sesión */ }
-  if (session) await enter(session.user); else renderLogin();
+  if (session) await enter(session.user); else await inicioSinSesion();
 }
 
 async function enter(user) {
   S.user = user;
+  S.publico = false; pararPublico(); document.body.classList.remove('modo-pub');
   let perfil = null;
   try { perfil = await API.miPerfil(user.id); } catch (e) { /* ignorar */ }
   if (!perfil || !perfil.activo) {
@@ -317,7 +320,160 @@ async function logout() {
   Object.assign(S, { user: null, perfil: null, premios: [], movs: [], alertas: [], perfiles: [], invCounts: {} });
   destroyCharts();
   history.replaceState(null, '', location.pathname + location.search);
-  renderLogin();
+  await inicioSinSesion();
+}
+
+
+/* =============================================================
+   MODO EQUIPO (sin sesión): link de retiros + "¿Eres jefe?"
+   ============================================================= */
+const LS_COD = 'sp_codigo';
+const codigo = () => { try { return localStorage.getItem(LS_COD) || ''; } catch (e) { return ''; } };
+function leerCodigoDeURL() {
+  try {
+    const u = new URL(location.href), c = u.searchParams.get('c');
+    if (c) { localStorage.setItem(LS_COD, c.trim()); u.searchParams.delete('c'); history.replaceState(null, '', u.pathname + u.search + u.hash); }
+  } catch (e) { /* ignorar */ }
+}
+function dispositivo() {
+  try {
+    let d = localStorage.getItem('sp_dispositivo');
+    if (!d) { d = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`; localStorage.setItem('sp_dispositivo', d); }
+    return d;
+  } catch (e) { return ''; }
+}
+const nombreEquipo = () => { try { return localStorage.getItem('sp_nombre') || ''; } catch (e) { return ''; } };
+const linkRetiros = c => `${location.origin}${location.pathname}?c=${encodeURIComponent(c)}`;
+
+async function inicioSinSesion(msg) {
+  S.publico = false;
+  let hay = true;
+  try { hay = await API.hayUsuarios(); } catch (e) { /* asumir que hay */ }
+  if (hay && codigo()) return renderPublico(msg);
+  return renderLogin(msg);
+}
+
+async function cargarCatalogo() {
+  const c = await API.rpc('retiro_catalogo', { p_codigo: codigo() });
+  const antes = new Map(S.premios.map(p => [p.id, p.stock_actual]));
+  S.premios = (c.premios || []).map(p => ({ ...p, activo: true, codigo: '', categoria_id: null }));
+  S.premios.forEach(p => { if (antes.has(p.id) && antes.get(p.id) !== p.stock_actual) flash(p.id, p.stock_actual - antes.get(p.id)); });
+  S.sectores = (c.sectores || []).map(x => ({ ...x, activo: true }));
+  S.frecuentes = c.frecuentes || [];
+  S.config.nombre_sucursal = c.sucursal || '';
+  const cart = S.rap.cart;
+  S.premios.forEach(p => { if (cart[p.id] > p.stock_actual) { if (p.stock_actual > 0) cart[p.id] = p.stock_actual; else delete cart[p.id]; } });
+  S.lastSync = Date.now();
+}
+function linkInvalido() {
+  try { localStorage.removeItem(LS_COD); } catch (e) { /* ignorar */ }
+  pararPublico();
+  app().innerHTML = `
+    <div class="setup">
+      <div class="brand-mark" style="margin-bottom:18px">${ic('link-2-off')}</div>
+      <h1>Este link ya no funciona</h1>
+      <p>Pídele a tu jefe el link de retiros nuevo y ábrelo en este teléfono.</p>
+      <button class="btn" id="li-jefe">${ic('key-round', 's')}Soy jefe o administrador</button>
+    </div>`;
+  icons();
+  $('#li-jefe').onclick = () => renderLogin();
+}
+function pararPublico() { if (S.pubTimer) clearInterval(S.pubTimer); S.pubTimer = null; }
+
+async function renderPublico(msg) {
+  S.publico = true; S.perfil = null; S.movs = []; S.alertas = [];
+  S.premios = []; S.view = 'rapido';
+  pararPublico();
+  try { await cargarCatalogo(); }
+  catch (e) { if (/LINK_INVALIDO/.test(e.message || '')) return linkInvalido(); return renderLogin(errMsg(e)); }
+  app().innerHTML = `
+    <div class="pub">
+      <header class="pub-top">
+        <div class="brand" style="padding:0;min-width:0">
+          <div class="brand-mark">${ic('gift')}</div>
+          <div style="min-width:0"><div class="pub-t">Retiro de premios</div><div class="pub-s">${esc(S.config.nombre_sucursal || '')}</div></div>
+        </div>
+        <span class="sp"></span>
+        <button class="btn sm" id="pub-jefe">${ic('key-round', 's')}¿Eres jefe?</button>
+      </header>
+      <main class="content pub-main" id="view"></main>
+    </div>`;
+  document.body.classList.add('modo-pub');
+  $('#pub-jefe').onclick = () => modalJefe();
+  VIEWS.rapido.mount($('#view'));
+  icons();
+  if (msg) toast(esc(msg), 'warn', 6000);
+  S.pubTimer = setInterval(async () => {
+    if (document.visibilityState !== 'visible' || !S.publico) return;
+    try { await cargarCatalogo(); VIEWS.rapido.paintGrid(); VIEWS.rapido.paintBar(); icons(); applyFlashes(); }
+    catch (e) { if (/LINK_INVALIDO/.test(e.message || '')) linkInvalido(); }
+  }, 15000);
+}
+
+async function modalJefe() {
+  let lista = [];
+  try { lista = await API.rpc('retiro_jefes', { p_codigo: codigo() }); } catch (e) { /* sin lista */ }
+  if (!lista || !lista.length) { pararPublico(); return renderLogin(); }
+  const md = modal({ title: '¿Quién eres?', body: '', foot: '' });
+  const body = md.$('.modal-b');
+  const elegir = () => {
+    body.innerHTML = `<p class="muted" style="margin:0 0 10px">Elige tu nombre y luego pon tu PIN.</p>
+      <ul class="list jefes">${lista.map((j, i) => `<li><button class="jefe-b" data-i="${i}">
+        <span class="avatar">${esc(iniciales(j.nombre))}</span>
+        <span class="grow"><span class="t1" style="display:block">${esc(j.nombre)}</span>
+        <span class="t2">${j.rol === 'admin' ? 'Administrador' : `Jefe de ${esc(j.sectores || 'todos los sectores')}`}</span></span>${ic('chevron-right', 's')}</button></li>`).join('')}</ul>`;
+    icons();
+    body.onclick = e => { const b = e.target.closest('[data-i]'); if (b) pedirPin(lista[+b.dataset.i]); };
+  };
+  const pedirPin = j => {
+    let pin = '';
+    body.onclick = null;
+    body.innerHTML = `
+      <div class="hola"><span class="avatar" style="width:48px;height:48px;font-size:17px">${esc(iniciales(j.nombre))}</span><div><b style="font-size:18px">${esc(j.nombre)}</b><div class="muted">Ingresa tu PIN</div></div></div>
+      <div class="form-err" id="mj-e" style="margin-bottom:10px"></div>
+      <div class="pin-dots" id="mj-d"></div>
+      <div class="keypad">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button type="button" data-k="${n}">${n}</button>`).join('')}
+        <button type="button" data-k="del" aria-label="Borrar">${ic('delete')}</button><button type="button" data-k="0">0</button>
+        <button type="button" class="ok" data-k="ok" id="mj-ok" aria-label="Entrar">${ic('arrow-right')}</button></div>
+      <div class="login-links"><button type="button" class="btn ghost sm" id="mj-back">${ic('chevron-left', 's')}Volver</button>
+        <button type="button" class="btn ghost sm" id="mj-pass">Usar contraseña</button></div>`;
+    icons();
+    const dots = () => { $('#mj-d').innerHTML = Array.from({ length: Math.max(4, pin.length) }, (_, i) => `<i class="${i < pin.length ? 'on' : ''}"></i>`).join(''); };
+    dots();
+    const entrar = async () => {
+      if (pin.length < 4) return showErr($('#mj-e'), 'El PIN tiene al menos 4 números.');
+      await busy($('#mj-ok'), async () => {
+        try {
+          const s = await ingresar(j.usuario, pin);
+          md.close(); pararPublico(); document.body.classList.remove('modo-pub');
+          recordarUsuario(j.usuario, j.nombre);
+          await enter(s.user);
+        } catch (e) { pin = ''; dots(); showErr($('#mj-e'), /Invalid login/i.test(e.message || '') ? 'PIN incorrecto.' : errMsg(e)); }
+      });
+    };
+    body.querySelector('.keypad').onclick = e => {
+      const b = e.target.closest('[data-k]'); if (!b) return;
+      const k = b.dataset.k;
+      if (k === 'del') pin = pin.slice(0, -1); else if (k === 'ok') return entrar(); else if (pin.length < 6) pin += k;
+      showErr($('#mj-e'), ''); dots();
+    };
+    $('#mj-back').onclick = elegir;
+    $('#mj-pass').onclick = () => { md.close(); pararPublico(); recordarUsuario(j.usuario, j.nombre); renderLogin(); };
+  };
+  elegir();
+}
+
+async function modalNombre() {
+  const md = modal({
+    title: '¿Cómo te llamas?',
+    body: `<div class="stack"><p class="muted" style="margin:0">Es opcional. Si lo pones, tu jefe ve quién retiró. Se guarda en este teléfono.</p>
+      <input class="in" id="nm-in" maxlength="40" value="${esc(nombreEquipo())}" placeholder="Ej.: Lucas" autocomplete="given-name"></div>`,
+    foot: `<button class="btn" id="nm-del">Quitar nombre</button><button class="btn pri" id="nm-ok">Guardar</button>`
+  });
+  const guardar = v => { try { v ? localStorage.setItem('sp_nombre', v) : localStorage.removeItem('sp_nombre'); } catch (e) { /* ignorar */ } md.close(); VIEWS.rapido.paintSec(); icons(); };
+  md.$('#nm-ok').onclick = () => guardar(md.$('#nm-in').value.trim());
+  md.$('#nm-del').onclick = () => guardar('');
+  md.$('#nm-in').onkeydown = e => { if (e.key === 'Enter') guardar(md.$('#nm-in').value.trim()); };
 }
 
 function renderSetup() {
@@ -419,7 +575,9 @@ function loginPin(lc, msg) {
            <div class="keypad">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button type="button" data-k="${n}">${n}</button>`).join('')}
              <button type="button" data-k="del" aria-label="Borrar">${ic('delete')}</button><button type="button" data-k="0">0</button>
              <button type="button" class="ok" data-k="ok" id="lb" aria-label="Entrar">${ic('arrow-right')}</button></div>`}
+      ${codigo() ? '' : `<div class="callout info" style="margin-top:16px">${ic('info', 's')}<span>¿Eres del equipo y vienes a retirar premios? No necesitas usuario: abre el <b>link de retiros</b> que te pasó tu jefe.</span></div>`}
       <div class="login-links">
+        ${codigo() ? `<button type="button" class="btn ghost sm" id="volver-ret">${ic('chevron-left', 's')}Volver a retiros</button>` : ''}
         ${rec && usuario === rec.usuario ? `<button type="button" class="btn ghost sm" id="otro">No soy ${esc((rec.nombre || '').split(' ')[0])}</button>` : ''}
         <button type="button" class="btn ghost sm" id="modo">${modoPass ? 'Usar PIN' : 'Usar contraseña'}</button>
       </div>`;
@@ -427,7 +585,8 @@ function loginPin(lc, msg) {
     const lu = $('#lu');
     if (lu) { lu.oninput = () => { usuario = lu.value.trim().toLowerCase(); }; if (!usuario) setTimeout(() => lu.focus(), 50); }
     $('#modo').onclick = () => { modoPass = !modoPass; pin = ''; msg = ''; render(); };
-    if ($('#otro')) $('#otro').onclick = () => { usuario = ''; pin = ''; msg = ''; try { localStorage.removeItem('sp_ultimo'); } catch (e) { /* ignorar */ } location.reload(); };
+    if ($('#volver-ret')) $('#volver-ret').onclick = () => { document.onkeydown = null; renderPublico(); };
+    if ($('#otro')) $('#otro').onclick = () => { usuario = ''; pin = ''; msg = ''; try { localStorage.removeItem('sp_ultimo'); } catch (e) { /* ignorar */ } render(); };
     if (modoPass) {
       $('#lf').onsubmit = e => { e.preventDefault(); entrar($('#lp').value); };
       setTimeout(() => (usuario ? $('#lp') : $('#lu')).focus(), 50);
@@ -923,7 +1082,7 @@ VIEWS.dashboard = {
 
     // personas que retiraron
     const vistos = new Set(), personas = [];
-    for (const m of sal) { if (!vistos.has(m.usuario_id)) { vistos.add(m.usuario_id); personas.push(m); } if (personas.length >= 6) break; }
+    for (const m of sal) { const k = m.usuario_id || m.usuario_nombre; if (!vistos.has(k)) { vistos.add(k); personas.push(m); } if (personas.length >= 6) break; }
     $('#d-personas').innerHTML = personas.length ? personas.map(m => `
       <li><span class="avatar">${esc(iniciales(m.usuario_nombre))}</span><div class="grow"><div class="t1">${esc(m.usuario_nombre)}</div><div class="t2">${fNum(qtyEf(m))} × ${esc(pNombre(m))}</div></div><span class="muted small">${rel(m.creado_en)}</span></li>`).join('')
       : `<li><div class="empty" style="width:100%">${ic('users')}<b>Sin retiros todavía</b></div></li>`;
@@ -1207,7 +1366,7 @@ function modalQuien(id) {
   const p = premio(id); if (!p) return;
   const sal = S.movs.filter(m => m.premio_id === id && m.tipo === 'salida');
   const vig = sal.filter(m => m.estado !== 'anulado');
-  const personas = new Set(vig.map(m => m.usuario_id)).size;
+  const personas = new Set(vig.map(m => m.usuario_id || m.usuario_nombre)).size;
   const m = modal({
     title: `¿Quién sacó ${esc(p.nombre)}?`, size: 'lg',
     body: `
@@ -1458,6 +1617,7 @@ VIEWS.rapido = {
     }
     const rm = t.closest('[data-rm]');
     if (rm) { delete R.cart[rm.dataset.rm]; this.paintGrid(); this.paintBar(); icons(); return; }
+    if (t.closest('#rp-nombre')) { modalNombre(); return; }
     if (t.closest('#rp-clear')) { R.cart = {}; R.obs = ''; R.nota = false; this.paintGrid(); this.paintBar(); icons(); return; }
     if (t.closest('#rp-nota')) { R.nota = !R.nota; this.paintBar(); icons(); if (R.nota) setTimeout(() => $('#rp-obs') && $('#rp-obs').focus(), 30); return; }
     if (t.closest('#rp-go')) this.submit();
@@ -1473,17 +1633,19 @@ VIEWS.rapido = {
       return;
     }
     if (!R.sector) {
-      $('#rp-sec').innerHTML = `<h2 class="rap-q">¿Para qué sector retiras?</h2>
+      $('#rp-sec').innerHTML = `<h2 class="rap-q">${S.publico ? '¿De qué equipo eres?' : '¿Para qué sector retiras?'}</h2>
         <div class="sec-grid">${secs.map(x => `<button class="sec-big" data-sec="${x.id}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>`;
       return;
     }
-    if (secs.length === 1) { $('#rp-sec').innerHTML = `<div class="sec-fijo">${ic('map-pin', 's')}Retiras para <b>${esc(sectorLabel(secs[0]))}</b></div>`; return; }
+    const quien = S.publico ? `<button class="nombre-b" id="rp-nombre">${ic('user-round', 's')}${nombreEquipo() ? `Retira: <b>${esc(nombreEquipo())}</b>` : 'Agregar mi nombre (opcional)'}${ic('pencil', 's')}</button>` : '';
+    if (secs.length === 1) { $('#rp-sec').innerHTML = `<div class="sec-fijo">${ic('map-pin', 's')}Retiras para <b>${esc(sectorLabel(secs[0]))}</b></div>${quien}`; return; }
     $('#rp-sec').innerHTML = `<div class="sec-row" role="radiogroup" aria-label="Sector">${secs.map(x => `
-      <button class="sec-chip ${x.id === R.sector ? 'on' : ''}" data-sec="${x.id}" role="radio" aria-checked="${x.id === R.sector}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>`;
+      <button class="sec-chip ${x.id === R.sector ? 'on' : ''}" data-sec="${x.id}" role="radio" aria-checked="${x.id === R.sector}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>${quien}`;
   },
   orden() {
     const R = S.rap, desde = Date.now() - 30 * 864e5;
     const fs = {}, fg = {};
+    if (S.publico) (S.frecuentes || []).forEach(x => { fg[x.premio_id] = (fg[x.premio_id] || 0) + x.unidades; if (x.sector_id === R.sector) fs[x.premio_id] = (fs[x.premio_id] || 0) + x.unidades; });
     salidasVig().forEach(m => {
       if (new Date(m.creado_en) < desde) return;
       fg[m.premio_id] = (fg[m.premio_id] || 0) + qtyEf(m);
@@ -1521,7 +1683,7 @@ VIEWS.rapido = {
     const R = S.rap, bar = $('#rp-bar'); if (!bar) return;
     const items = Object.entries(R.cart).map(([id, n]) => ({ p: premio(id), n })).filter(i => i.p);
     const tot = sum(items, i => i.n);
-    if (!R.sector || !S.sectores.length) { bar.innerHTML = `<span class="muted">Elige tu sector para empezar.</span>`; return; }
+    if (!R.sector || !S.sectores.length) { bar.innerHTML = `<span class="muted">${S.publico ? 'Elige tu equipo para empezar.' : 'Elige tu sector para empezar.'}</span>`; return; }
     bar.innerHTML = `
       ${R.nota ? `<input class="in rap-obs" id="rp-obs" placeholder="Nota opcional (ej.: acción en vereda)" value="${esc(R.obs)}" maxlength="200">` : ''}
       <div class="cart">${tot ? items.map(i => `<button class="cart-i" data-rm="${i.p.id}" title="Quitar">${i.n} × ${esc(i.p.nombre)} ${ic('x', 's')}</button>`).join('')
@@ -1539,7 +1701,9 @@ VIEWS.rapido = {
     const sector = sectorDe(R.sector);
     await busy($('#rp-go'), async () => {
       try {
-        const movs = await API.rpc('registrar_retiro_rapido', { p_sector_id: R.sector, p_items: items, p_observacion: (R.obs || '').trim() || null });
+        const movs = S.publico
+          ? await API.rpc('retiro_publico', { p_codigo: codigo(), p_sector_id: R.sector, p_items: items, p_nombre: nombreEquipo() || null, p_observacion: (R.obs || '').trim() || null, p_dispositivo: dispositivo() })
+          : await API.rpc('registrar_retiro_rapido', { p_sector_id: R.sector, p_items: items, p_observacion: (R.obs || '').trim() || null });
         const lista = Array.isArray(movs) ? movs : [movs];
         lista.forEach(aplicarMovLocal);
         const tot = sum(items, i => i.cantidad);
@@ -1551,7 +1715,8 @@ VIEWS.rapido = {
           label: 'Deshacer',
           onClick: async () => {
             try {
-              await API.rpc('deshacer_retiro', { p_ids: ids });
+              if (S.publico) await API.rpc('deshacer_publico', { p_codigo: codigo(), p_ids: ids, p_dispositivo: dispositivo() });
+              else await API.rpc('deshacer_retiro', { p_ids: ids });
               lista.forEach(m => {
                 const mm = S.movs.find(x => x.id === m.id); if (mm) mm.estado = 'anulado';
                 const p = premio(m.premio_id); if (p) { flash(p.id, m.cantidad); p.stock_actual += m.cantidad; }
@@ -1561,7 +1726,12 @@ VIEWS.rapido = {
             } catch (er) { toast(esc(errMsg(er)), 'bad', 7000); }
           }
         });
-      } catch (e) { toast(esc(errMsg(e)), 'bad', 7000); this.paint(); icons(); }
+      } catch (e) {
+        if (/LINK_INVALIDO/.test(e.message || '')) return linkInvalido();
+        toast(esc(errMsg(e)), 'bad', 7000);
+        if (S.publico) { try { await cargarCatalogo(); } catch (er) { /* ignorar */ } }
+        this.paint(); icons();
+      }
     });
   }
 };
@@ -1630,8 +1800,8 @@ VIEWS.consumo = {
     const tot = sum(vig, qtyEf);
     $('#cs-k').innerHTML = `
       <div class="kpi"><span class="kpi-l">${ic('package-minus', 's')}Unidades</span><span class="kpi-v">${fNum(tot)}</span><span class="kpi-s">retiradas</span></div>
-      <div class="kpi"><span class="kpi-l">${ic('zap', 's')}Retiros</span><span class="kpi-v">${fNum(new Set(vig.map(m => m.usuario_id + '|' + m.creado_en.slice(0, 16))).size)}</span><span class="kpi-s">registrados</span></div>
-      <div class="kpi"><span class="kpi-l">${ic('users', 's')}Personas</span><span class="kpi-v">${fNum(new Set(vig.map(m => m.usuario_id)).size)}</span><span class="kpi-s">retiraron</span></div>`;
+      <div class="kpi"><span class="kpi-l">${ic('zap', 's')}Retiros</span><span class="kpi-v">${fNum(new Set(vig.map(m => (m.usuario_id || m.usuario_nombre) + '|' + m.creado_en.slice(0, 16))).size)}</span><span class="kpi-s">registrados</span></div>
+      <div class="kpi"><span class="kpi-l">${ic('users', 's')}Personas</span><span class="kpi-v">${fNum(new Set(vig.map(m => m.usuario_id || m.usuario_nombre)).size)}</span><span class="kpi-s">retiraron</span></div>`;
     const barras = (map, box, vacio) => {
       const arr = Object.entries(map).sort((a, b) => b[1] - a[1]);
       const max = arr.length ? arr[0][1] : 1;
@@ -2128,7 +2298,7 @@ VIEWS.reportes = {
       <div class="kpi"><span class="kpi-l">Unidades entregadas</span><span class="kpi-v">${fNum(totU)}</span><span class="kpi-s">${fNum(sal.length)} retiros</span></div>
       <div class="kpi"><span class="kpi-l">Unidades ingresadas</span><span class="kpi-v">${fNum(sum(ing, qtyEf))}</span><span class="kpi-s">${fNum(ing.length)} ingresos</span></div>
       <div class="kpi"><span class="kpi-l">Ajustes</span><span class="kpi-v">${fNum(enR.filter(m => m.tipo === 'ajuste' && m.estado !== 'anulado').length)}</span><span class="kpi-s">Diferencia neta ${signo(sum(enR.filter(m => m.tipo === 'ajuste' && m.estado !== 'anulado'), m => m.delta))}</span></div>
-      <div class="kpi"><span class="kpi-l">Personas que retiraron</span><span class="kpi-v">${fNum(new Set(sal.map(m => m.usuario_id)).size)}</span><span class="kpi-s">En el período</span></div>`;
+      <div class="kpi"><span class="kpi-l">Personas que retiraron</span><span class="kpi-v">${fNum(new Set(sal.map(m => m.usuario_id || m.usuario_nombre)).size)}</span><span class="kpi-s">En el período</span></div>`;
 
     // períodos (rellenando huecos)
     const key = d => f.agrupar === 'mes' ? ymd(d).slice(0, 7) : f.agrupar === 'semana' ? ymd(lunes(d)) : ymd(d);
@@ -2172,10 +2342,10 @@ VIEWS.reportes = {
     // por usuario
     const porU = new Map();
     sal.forEach(m => {
-      const r = porU.get(m.usuario_id) || { nombre: m.usuario_nombre, retiros: 0, unidades: 0, ultimo: m.creado_en, pp: {} };
+      const r = porU.get(m.usuario_id || m.usuario_nombre) || { nombre: m.usuario_nombre, retiros: 0, unidades: 0, ultimo: m.creado_en, pp: {} };
       r.retiros++; r.unidades += qtyEf(m); if (m.creado_en > r.ultimo) r.ultimo = m.creado_en;
       r.pp[m.premio_id] = (r.pp[m.premio_id] || 0) + qtyEf(m);
-      porU.set(m.usuario_id, r);
+      porU.set(m.usuario_id || m.usuario_nombre, r);
     });
     const usr = [...porU.values()].map(r => { const fav = Object.entries(r.pp).sort((a, b) => b[1] - a[1])[0]; return { ...r, fav: fav ? `${(premio(fav[0]) || {}).nombre || '—'} (${fav[1]})` : '—' }; }).sort((a, b) => b.unidades - a.unidades);
     $('#r-usr').innerHTML = usr.length ? usr.map(r => `<tr><td class="main-cell" data-label="Usuario"><div class="pcell"><span class="avatar">${esc(iniciales(r.nombre))}</span><b>${esc(r.nombre)}</b></div></td><td data-label="Retiros" class="n num">${fNum(r.retiros)}</td><td data-label="Unidades" class="n strong num">${fNum(r.unidades)}</td><td data-label="Premio que más retiró">${esc(r.fav)}</td><td data-label="Último retiro" class="muted">${rel(r.ultimo)}</td></tr>`).join('')
@@ -2213,7 +2383,8 @@ VIEWS.usuarios = {
   mount(el) {
     const f = S.f.usr;
     el.innerHTML = `
-      <div class="page-head"><p>Personas que pueden entrar al sistema con su usuario y PIN. Los usuarios con historial no se eliminan: se desactivan para conservar la trazabilidad.</p><span class="sp"></span>
+      <div class="callout info" style="margin-bottom:14px">${ic('info', 's')}<span>El equipo (promotores, salón, ventas) <b>no necesita usuario</b>: retira con el link de retiros. <a href="#/configuracion">Ver el link</a>.</span></div>
+      <div class="page-head"><p>Aquí van los jefes de sector y los administradores, que entran con su PIN desde "¿Eres jefe?". Los usuarios con historial no se eliminan: se desactivan para conservar la trazabilidad.</p><span class="sp"></span>
         <button class="btn pri" id="u-new">${ic('user-plus')}Nuevo usuario</button></div>
       <div class="panel">
         <div class="panel-b" style="padding-bottom:4px"><div class="toolbar">
@@ -2268,7 +2439,7 @@ VIEWS.usuarios = {
 };
 function modalUsuario(u) {
   const nuevo = !u;
-  let rol = u ? u.rol : 'usuario';
+  let rol = u ? u.rol : 'supervisor';
   const sel = new Set((u && u.sector_ids) || []);
   const md = modal({
     title: nuevo ? 'Nuevo usuario' : `Editar a ${esc(u.nombre_completo)}`, size: 'lg',
@@ -2282,7 +2453,7 @@ function modalUsuario(u) {
       ${nuevo ? `<div class="grid2"><div class="field"><label for="up">PIN (4 a 6 números) *</label><input class="in pin-in" id="up" type="tel" inputmode="numeric" maxlength="6" autocomplete="off"></div>
         <div class="field"><label for="up2">Repetir PIN *</label><input class="in pin-in" id="up2" type="tel" inputmode="numeric" maxlength="6" autocomplete="off"></div></div>` : ''}
       <div class="field"><span class="lbl">¿Qué puede hacer?</span>
-        <div class="roles" id="urol">${Object.entries(ROLES).map(([k, v]) => `
+        <div class="roles" id="urol">${Object.entries(ROLES).filter(([k]) => k !== 'usuario' || (u && u.rol === 'usuario')).map(([k, v]) => `
           <button type="button" class="type" data-rol="${k}">${ic(v.i, 'l')}<span><span class="t">${v.t}</span><br><span class="s">${v.s}</span></span></button>`).join('')}</div></div>
       <div class="field" id="usec-w"><span class="lbl" id="usec-l"></span>
         <div class="chips" id="usec">${sectoresActivos().map(x => `<button type="button" class="chip" data-sid="${x.id}">${esc(sectorLabel(x))}</button>`).join('') || '<span class="muted small">No hay sectores (ejecuta la migración 02).</span>'}</div>
@@ -2542,6 +2713,7 @@ VIEWS.configuracion = {
   mount(el) {
     const admin = isAdmin(), dark = document.documentElement.dataset.theme === 'dark';
     el.innerHTML = `
+      ${admin ? '<div class="panel" id="c-link" style="margin-bottom:18px"></div>' : ''}
       <div class="cols-2e">
         <div class="gap" style="align-content:start">
           <div class="panel"><div class="panel-h"><h2>Apariencia</h2></div><div class="panel-b">
@@ -2557,12 +2729,13 @@ VIEWS.configuracion = {
             <div class="field"><label for="c-umb">Umbral de ajuste importante</label><input class="in num" id="c-umb" type="number" min="1" value="${esc(S.config.umbral_ajuste_importante || '10')}" style="max-width:160px"><span class="hint">Un ajuste de esta cantidad de unidades o más genera una alerta.</span></div>
             <div><button class="btn pri" id="c-save">Guardar</button></div></div></div>` : ''}
         </div>
-        ${admin ? `<div class="panel" style="align-self:start"><div class="panel-h"><h2>Categorías de premios</h2></div><div class="panel-b">
+        ${admin ? `<div class="gap" style="align-content:start">
+          <div class="panel" style="align-self:start"><div class="panel-h"><h2>Categorías de premios</h2></div><div class="panel-b">
           <form class="row" id="c-catf" style="flex-wrap:nowrap;margin-bottom:8px"><input class="in" id="c-catn" placeholder="Nueva categoría"><button class="btn pri">${ic('plus', 's')}Agregar</button></form>
           <div id="c-cats"></div></div>
           <div class="panel-h" style="border-top:1px solid var(--line);padding-top:16px"><h2>Sectores</h2><span class="sub">Para el retiro rápido</span></div><div class="panel-b">
           <form class="row" id="c-secf" style="flex-wrap:nowrap;margin-bottom:8px"><input class="in" id="c-secn" placeholder="Nuevo sector"><input class="in" id="c-secg" placeholder="Grupo (opcional)" style="max-width:150px"><button class="btn pri">${ic('plus', 's')}Agregar</button></form>
-          <div id="c-secs"></div></div></div>` : `<div class="panel" style="align-self:start"><div class="panel-h"><h2>Tu cuenta</h2></div><div class="panel-b">
+          <div id="c-secs"></div></div></div></div>` : `<div class="panel" style="align-self:start"><div class="panel-h"><h2>Tu cuenta</h2></div><div class="panel-b">
           <dl class="kv"><dt>Nombre</dt><dd>${esc(S.perfil.nombre_completo)}</dd><dt>Usuario</dt><dd>${esc(S.perfil.usuario)}</dd><dt>Rol</dt><dd>${(ROLES[rolActual()] || {}).t || ''}</dd>
           ${S.sectores.length ? `<dt>Sectores</dt><dd>${esc(nombresSectores(S.perfil.sector_ids))}</dd>` : ''}</dl>
           <p class="muted small">Para cambiar tu nombre o rol, consulta con un administrador.</p></div></div>`}
@@ -2608,6 +2781,7 @@ VIEWS.configuracion = {
         catch (err) { toast(esc(errMsg(err)), 'bad'); }
       }
     };
+    if ($('#c-link')) this.paintLink();
     if ($('#c-secf')) {
       $('#c-secf').onsubmit = async e => {
         e.preventDefault();
@@ -2632,6 +2806,37 @@ VIEWS.configuracion = {
       };
     }
     this.paint();
+  },
+  paintLink() {
+    const box = $('#c-link'); if (!box) return;
+    const c = S.config.codigo_retiro;
+    if (!c) {
+      box.innerHTML = `<div class="panel-h"><h2>Link de retiros del equipo</h2></div><div class="panel-b"><div class="callout warn">${ic('triangle-alert', 's')}<span>Ejecuta <b>migracion_04_retiro_sin_login.sql</b> en Supabase para habilitar el link.</span></div></div>`;
+      icons(); return;
+    }
+    const link = linkRetiros(c);
+    const msj = `Link para registrar los retiros de premios de ${S.config.nombre_sucursal || 'la sucursal'}. Ábrelo una vez en tu teléfono y guárdalo: ${link}`;
+    box.innerHTML = `<div class="panel-h"><h2>Link de retiros del equipo</h2></div><div class="panel-b stack">
+      <p class="muted" style="margin:0">El equipo no necesita usuario ni PIN: abre este link una vez en su teléfono, elige su equipo y retira. Mándalo al grupo de WhatsApp.</p>
+      <input class="in" id="c-lk" value="${esc(link)}" readonly>
+      <div class="row">
+        <button class="btn pri" id="c-wa">${ic('send', 's')}Compartir por WhatsApp</button>
+        <button class="btn" id="c-cp">${ic('copy', 's')}Copiar link</button>
+        <button class="btn ghost" id="c-new">${ic('refresh-cw', 's')}Generar link nuevo</button>
+      </div>
+      <span class="hint muted small">Si el link llega a alguien que no debería tenerlo, genera uno nuevo: el anterior deja de funcionar en todos los teléfonos.</span></div>`;
+    icons();
+    $('#c-wa').onclick = () => window.open(`https://wa.me/?text=${encodeURIComponent(msj)}`, '_blank', 'noopener');
+    $('#c-cp').onclick = async () => {
+      try { await navigator.clipboard.writeText(link); toast('Link copiado.', 'ok', 2500); }
+      catch (e) { $('#c-lk').select(); document.execCommand && document.execCommand('copy'); toast('Link copiado.', 'ok', 2500); }
+    };
+    $('#c-new').onclick = async () => {
+      if (!(await confirmar({ title: 'Generar link nuevo', ok: 'Generar link nuevo', danger: true,
+        body: '<p>El link actual deja de funcionar en <b>todos</b> los teléfonos. Vas a tener que mandar el nuevo al equipo.</p>' }))) return;
+      try { S.config.codigo_retiro = await API.rpc('admin_regenerar_codigo', {}); this.paintLink(); toast('Link nuevo generado. Compártelo con el equipo.', 'ok'); }
+      catch (e) { toast(esc(errMsg(e)), 'bad'); }
+    };
   },
   paint() {
     const sb = $('#c-secs');

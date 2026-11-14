@@ -14,7 +14,8 @@ app.js                Lógica de la aplicación
 config.js             Datos de conexión a Supabase (completar)
 supabase/schema.sql   Base de datos completa: tablas, seguridad, funciones, auditoría
 supabase/migracion_02_retiro_rapido.sql   Sectores y Retiro rápido (ejecutar después de schema.sql)
-supabase/migracion_03_roles.sql           Roles: retiro de premios y jefe de sector (ejecutar después de la 02)
+supabase/migracion_03_roles.sql           Roles: jefe de sector (ejecutar después de la 02)
+supabase/migracion_04_retiro_sin_login.sql  Link de retiros del equipo, sin usuario (ejecutar después de la 03)
 ```
 
 ---
@@ -37,8 +38,9 @@ Esto crea todas las tablas, las reglas de seguridad, el tiempo real y el espacio
 
 4. Abre otra **New query**, pega el contenido de `supabase/migracion_02_retiro_rapido.sql` y presiona **Run**. Agrega los sectores (Promoción; Salón: Recepción, Pretest, Full test; Ventas) y el Retiro rápido. Se puede ejecutar de nuevo sin problema: no borra datos.
 5. Haz lo mismo con `supabase/migracion_03_roles.sql` (roles y sectores por usuario).
+6. Y con `supabase/migracion_04_retiro_sin_login.sql` (link de retiros del equipo).
 
-Orden siempre: `schema.sql` → `migracion_02` → `migracion_03`.
+Orden siempre: `schema.sql` → `migracion_02` → `migracion_03` → `migracion_04`.
 
 ### 3. Configurar el inicio de sesión
 
@@ -74,28 +76,33 @@ La clave publicable es pública por diseño: la seguridad la garantizan las regl
 1. Abre la dirección de la app. Como todavía no hay usuarios, aparece **Crear el administrador**.
 2. Completa nombre, usuario y un **PIN** de 4 a 6 números (para el administrador conviene 6). Esa cuenta queda como **Administrador**.
 3. En **Configuración** revisa el nombre de la sucursal y las categorías.
-4. En **Usuarios › Nuevo usuario** crea las cuentas del equipo: nombre, usuario, PIN, qué puede hacer y sus sectores. La app muestra el usuario y el PIN para que se los pases a la persona.
+4. En **Usuarios › Nuevo usuario** crea solo a los **jefes de sector** (líder de promotores, de salón, de ventas) y a otros administradores, cada uno con su PIN. El equipo no necesita usuario.
+5. En **Configuración › Link de retiros del equipo** toca **Compartir por WhatsApp** y mándalo al grupo. Cada persona lo abre una vez en su teléfono y ya puede retirar.
 5. En **Stock de Premios › Nuevo premio** carga los premios (con stock inicial, que se registra como ingreso).
 
 ---
 
 ## Cómo funciona
 
-### Ingreso con PIN
+### Cómo entra cada uno
 
-Cada persona entra con su **usuario y un PIN de 4 a 6 números**, con un teclado grande en pantalla. El teléfono recuerda quién fue el último en entrar, así que las siguientes veces solo se escribe el PIN, y la sesión queda abierta hasta que se toca "Cerrar sesión". "No soy…" permite cambiar de persona en un teléfono compartido.
+- **El equipo (promotores, salón, ventas): sin usuario ni PIN.** Abre el **link de retiros** una vez en su teléfono; desde ahí la app abre directo en la pantalla de retiro. Elige su equipo (queda guardado) y, si quiere, su nombre para que el jefe vea quién retiró. Toca los premios y registra.
+- **Jefes y administradores:** en esa misma pantalla, arriba a la derecha, tocan **"¿Eres jefe?"**, eligen su nombre de la lista y ponen su **PIN**. La sesión queda abierta hasta que tocan "Cerrar sesión"; al cerrarla, el teléfono vuelve a la pantalla de retiro.
+- Desde una computadora sin link: aparece el ingreso con usuario y PIN.
+
+**Seguridad del link:** sin el link no se puede ver el stock ni retirar nada. Si el link llega a alguien que no debería tenerlo, en **Configuración** toca **Generar link nuevo**: el anterior deja de funcionar en todos los teléfonos y mandas el nuevo al grupo. Cada retiro del equipo queda registrado con el equipo, el nombre (si lo puso), la fecha y la hora, y desde qué teléfono se hizo. Deshacer solo funciona desde el mismo teléfono y dentro de los 10 minutos.
 
 Si el administrador se creó antes con una contraseña común, puede entrar con **Usar contraseña** y luego pasarse a PIN en **Configuración › Mi PIN**.
 
 ### Quién puede hacer qué
 
-- **Administrador:** todo (dashboard, stock, ingresos, ajustes, inventario, historial, reportes, usuarios, auditoría).
-- **Retiro de premios** (promotores, recepción, salón, ventas): solo **Retiro rápido**, ver el stock y **Mis retiros**. Si tiene un único sector asignado, el retiro rápido ya lo trae elegido.
-- **Jefe de sector** (líder de promotores, de salón, de ventas): **solo consulta**. Ve en **Consumo** qué se retiró, quién lo retiró, y la fecha y hora exactas, agrupado por día (hoy, semana, mes, mes anterior), y lo puede exportar a Excel o PDF. No puede cargar nada; la base de datos lo bloquea. Un jefe general se crea igual pero **sin marcar sectores**, y ve todos.
+- **Equipo (con el link):** solo **retirar premios** para su equipo y deshacer su último retiro.
+- **Jefe de sector** (líder de promotores, de salón, de ventas): **solo consulta**. En **Consumo** ve qué se retiró y quién, con la fecha y la hora exactas, agrupado por día (hoy, semana, mes, mes anterior), y puede exportarlo a Excel o PDF. No puede cargar nada; lo bloquea la base de datos. Un **jefe general** se crea igual pero **sin marcar sectores**, y ve todos.
+- **Administrador:** todo (dashboard, stock, ingresos, ajustes, inventario, historial, reportes, usuarios, auditoría, link de retiros).
 
 ### Retiro rápido (reemplazo del grupo de WhatsApp)
 
-Es la pantalla con la que abre la app para los usuarios. Está pensada para el celular:
+Es la pantalla que ve el equipo al abrir el link (y los administradores en el menú). Está pensada para el celular:
 
 1. **Sector:** la primera vez se elige (Promoción, Recepción, Pretest, Full test o Ventas). El celular lo recuerda; para cambiarlo se toca otro sector arriba.
 2. **Premios:** cada toque en un premio suma 1. El número azul muestra cuántos llevas; el botón "−" resta. Los más retirados por ese sector aparecen primero.
@@ -108,15 +115,14 @@ Los administradores pueden agregar, renombrar, agrupar, ordenar o desactivar sec
 
 ### Roles
 
-| | Administrador | Retiro de premios | Jefe de sector |
+| | Administrador | Jefe de sector | Equipo (link) |
 |---|---|---|---|
-| Ver stock | Sí | Sí | Sí |
-| Retiro rápido | Sí | Sí (sus sectores) | No |
-| Deshacer sus propios retiros (10 min) | Sí | Sí | No |
-| Consumo por sector con fecha y hora | Todos | No | Sus sectores |
+| Entra con | Usuario y PIN | Nombre y PIN ("¿Eres jefe?") | Solo el link |
+| Retirar premios | Sí | No | Sí |
+| Ver stock | Sí | Sí | En la pantalla de retiro |
+| Consumo por sector con fecha y hora | Todos | Sus sectores | No |
 | Ingresos, ajustes, inventario | Sí | No | No |
 | Premios, usuarios, reportes, auditoría | Sí | No | No |
-| Historial | Completo | Solo el propio | Solo sus sectores |
 
 Los permisos se controlan **en la base de datos**, no solo en la pantalla: aunque alguien manipule la página, Supabase rechaza la operación.
 
