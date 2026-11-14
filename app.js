@@ -340,10 +340,14 @@ async function logout() {
    ============================================================= */
 const LS_COD = 'sp_codigo';
 const codigo = () => { try { return localStorage.getItem(LS_COD) || ''; } catch (e) { return ''; } };
+// El código queda en la dirección: así, al "Agregar a pantalla de inicio" (sobre todo en iPhone,
+// donde el ícono no comparte datos con Safari) el acceso directo guarda el link completo.
 function leerCodigoDeURL() {
   try {
     const u = new URL(location.href), c = u.searchParams.get('c');
-    if (c) { localStorage.setItem(LS_COD, c.trim()); u.searchParams.delete('c'); history.replaceState(null, '', u.pathname + u.search + u.hash); }
+    if (c) { localStorage.setItem(LS_COD, c.trim()); return; }
+    const guardado = localStorage.getItem(LS_COD);
+    if (guardado) { u.searchParams.set('c', guardado); history.replaceState(null, '', u.pathname + u.search + u.hash); }
   } catch (e) { /* ignorar */ }
 }
 function dispositivo() {
@@ -378,7 +382,10 @@ async function cargarCatalogo() {
   S.lastSync = Date.now();
 }
 function linkInvalido() {
-  try { localStorage.removeItem(LS_COD); } catch (e) { /* ignorar */ }
+  try {
+    localStorage.removeItem(LS_COD);
+    const u = new URL(location.href); u.searchParams.delete('c'); history.replaceState(null, '', u.pathname + u.search + u.hash);
+  } catch (e) { /* ignorar */ }
   pararPublico();
   app().innerHTML = `
     <div class="setup">
@@ -2035,7 +2042,7 @@ const gNota = (t, tipo = 'info') => `<div class="callout ${tipo}" style="margin-
 function guiaEquipo() {
   return gSec('link', 'Abrir la app', gPaso([
       'Abre el <b>link de retiros</b> que te pasó tu jefe por WhatsApp.',
-      'Guárdalo en la pantalla de inicio del celular para tenerlo a mano (en el menú del navegador: <b>Agregar a pantalla de inicio</b>).',
+      'Guárdalo como app: en iPhone toca <b>Compartir</b> › <b>Agregar a inicio</b>; en Android, menú (⋮) › <b>Agregar a la pantalla principal</b>. Aparece el ícono <b>Premios</b>.',
       'No necesitas usuario ni contraseña.'
     ]), true)
     + gSec('users', 'Elegir tu equipo y tu nombre', gPaso([
