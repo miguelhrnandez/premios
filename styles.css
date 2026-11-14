@@ -1,67 +1,80 @@
 /* =============================================================
-   STOCK DE PREMIOS · estilos
+   PREMIOS · MÁS DUEÑOS · estilos
    ============================================================= */
+/* Identidad Más Dueños: rojo de marca, gris claro de fondo, tipografía Alexandria */
 :root {
   color-scheme: light;
-  --bg: #f2f4f7;
+  --bg: #f6f6f7;
   --surface: #ffffff;
-  --surface-2: #f7f8fa;
-  --ink: #162033;
-  --ink-2: #47536a;
-  --muted: #76829a;
-  --line: #e1e5ec;
-  --line-2: #cfd5df;
-  --accent: #2453d4;
-  --accent-hover: #1c45b8;
-  --accent-soft: #e8eefc;
+  --surface-2: #f3f3f4;
+  --ink: #2e2e2e;
+  --ink-2: #545860;
+  --muted: #69727d;
+  --line: #e6e6e8;
+  --line-2: #d5d6d9;
+  --accent: #e52c28;
+  --accent-hover: #c81415;
+  --accent-soft: #fdecea;
   --accent-ink: #ffffff;
-  --side: #13203a;
-  --side-2: #1b2a48;
-  --side-ink: #c9d2e3;
+  --side: #e52c28;
+  --side-2: rgba(255, 255, 255, .16);
+  --side-cut: #cf1e1a;
+  --side-ink: #ffe3e1;
   --side-ink-strong: #ffffff;
+  --nav-on-bg: #ffffff;
+  --nav-on-ink: #d92727;
+  --teal: #13958f;    --teal-bg: #e2f3f2;
 
-  --ok: #11805b;      --ok-bg: #e2f4ec;
+  --ok: #13795b;      --ok-bg: #e2f4ec;
   --low: #9a6300;     --low-bg: #fff2d3;  --low-dot: #e0a100;
-  --out: #c0342e;     --out-bg: #fde6e5;
-  --info: #2453d4;    --info-bg: #e8eefc;
-  --violet: #6250d6;  --violet-bg: #eeebfc;
+  --out: #b3261e;     --out-bg: #fde7e6;
+  --info: #0f7c77;    --info-bg: #e2f3f2;
+  --violet: #5a4ac4;  --violet-bg: #eeebfc;
 
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --series-3: #1baf7a;
+  --series-1: #13958f;
+  --series-2: #e52c28;
+  --series-3: #6b5bd6;
 
-  --r-s: 6px; --r-m: 10px; --r-l: 14px;
-  --shadow-pop: 0 12px 32px rgba(15, 25, 45, .16), 0 2px 6px rgba(15, 25, 45, .08);
-  --side-w: 248px;
-  --font: 'Onest', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --r-s: 8px; --r-m: 14px; --r-l: 18px;
+  --shadow-pop: 0 14px 34px rgba(40, 20, 20, .16), 0 2px 6px rgba(40, 20, 20, .08);
+  --shadow-card: 0 1px 2px rgba(40, 20, 20, .04), 0 6px 18px rgba(40, 20, 20, .05);
+  --side-w: 252px;
+  --font: 'Alexandria', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0d1320;
-  --surface: #151d2e;
-  --surface-2: #1a2337;
-  --ink: #e8ecf3;
-  --ink-2: #b4bed0;
-  --muted: #8490a6;
-  --line: #263249;
-  --line-2: #34415c;
-  --accent: #5b83f0;
-  --accent-hover: #7396f3;
-  --accent-soft: #1d2a4c;
-  --accent-ink: #0b1220;
-  --side: #0a0f1a;
-  --side-2: #151d2e;
+  --bg: #17181a;
+  --surface: #1f2023;
+  --surface-2: #26282b;
+  --ink: #f0f0f1;
+  --ink-2: #c4c6cb;
+  --muted: #8f949c;
+  --line: #2f3135;
+  --line-2: #3d4046;
+  --accent: #e8403b;
+  --accent-hover: #f0544f;
+  --accent-soft: #3a1d1c;
+  --accent-ink: #ffffff;
+  --side: #1d1e21;
+  --side-2: #2b2d31;
+  --side-cut: #221a1b;
+  --side-ink: #c4c6cb;
+  --side-ink-strong: #ffffff;
+  --nav-on-bg: #e8403b;
+  --nav-on-ink: #ffffff;
+  --teal: #1fa39c;    --teal-bg: #12302e;
 
   --ok: #45c493;      --ok-bg: #12372b;
   --low: #f0bd4f;     --low-bg: #3a2d0e;  --low-dot: #f0bd4f;
   --out: #f07a73;     --out-bg: #3d1a1a;
-  --info: #7d9df4;    --info-bg: #1d2a4c;
+  --info: #3cc0b8;    --info-bg: #12302e;
   --violet: #9085e9;  --violet-bg: #27244a;
 
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --series-3: #199e70;
-  --shadow-pop: 0 12px 32px rgba(0, 0, 0, .5);
+  --series-1: #1fa39c;
+  --series-2: #f0544f;
+  --series-3: #8f82ec;
+  --shadow-pop: 0 14px 34px rgba(0, 0, 0, .5);
+  --shadow-card: none;
 }
 
 * { box-sizing: border-box; }
@@ -421,7 +434,7 @@ table.rt { width: 100%; border-collapse: collapse; font-size: 14px; }
 .login-form { display: grid; place-items: center; padding: 32px 20px; }
 .login-card { width: 100%; max-width: 380px; }
 .login-card h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -.01em; }
-.login-card > p { color: var(--ink-2); margin: 0 0 24px; }
+.login-card > p, #lc > p { color: var(--ink-2); margin: 0 0 24px; }
 @media (max-width: 860px) { .login { grid-template-columns: 1fr; } .login-art { display: none; } }
 
 /* ---------- Varios ---------- */
@@ -660,3 +673,96 @@ body.modo-pub .rap-bar { left: 0; }
 .g-aviso span { flex: 1; }
 .modal .guia .gsec { border-radius: 12px; }
 @media (max-width: 640px) { .g-b { padding-left: 16px; } }
+
+
+/* =============================================================
+   MARCA MÁS DUEÑOS
+   ============================================================= */
+h1, h2, h3, .top h1, .login-card h1, .g-hero h2, .kpi-v { letter-spacing: -.015em; }
+.top h1 { font-weight: 700; }
+.login-card h1, .setup h1 { font-weight: 800; }
+
+/* Logo: isotipo (si existe icons/isotipo.png) + "MásDueños" */
+.marca { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.marca-iso { width: 36px; height: 36px; object-fit: contain; flex: none; }
+.marca-w { font-size: 21px; line-height: 1; color: var(--ink); white-space: nowrap; letter-spacing: -.02em; }
+.marca-w span { font-weight: 400; }
+.marca-w b { font-weight: 700; color: var(--accent); }
+.marca-s { font-size: 12.5px; color: var(--muted); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.marca.on-red .marca-iso { filter: brightness(0) invert(1); }
+.marca.on-red .marca-w, .marca.on-red .marca-w b { color: #fff; }
+.marca.on-red .marca-s { color: var(--side-ink); }
+.marca.sm .marca-w { font-size: 18px; }
+.marca.sm .marca-iso { width: 30px; height: 30px; }
+.marca.sm .marca-s { margin-top: 3px; font-size: 12px; }
+
+/* Menú lateral rojo con el corte diagonal de la marca */
+.side { background: linear-gradient(164deg, var(--side) 0 74%, var(--side-cut) calc(74% + 1px)); }
+.side .brand { padding: 6px 10px 22px; }
+.nav-sep { opacity: .75; }
+.nav a { border-radius: 99px; padding: 9px 14px; }
+.nav a:hover { background: var(--side-2); }
+.nav a.on { background: var(--nav-on-bg); color: var(--nav-on-ink); font-weight: 700; box-shadow: 0 3px 10px rgba(120, 10, 10, .18); }
+.nav a .cnt { background: #fff; color: #c81415; }
+.nav a.on .cnt { background: var(--accent); color: #fff; }
+.side-foot { border-top-color: rgba(255, 255, 255, .22); }
+:root[data-theme="dark"] .side-foot { border-top-color: var(--side-2); }
+.me { border-radius: 14px; }
+.side .avatar { background: rgba(255, 255, 255, .2); }
+:root[data-theme="dark"] .side .marca-w b { color: var(--accent); }
+:root[data-theme="dark"] .side .marca-iso { filter: none; }
+:root[data-theme="dark"] .nav a.on { box-shadow: none; }
+
+/* Botones redondeados como en la web */
+.btn { border-radius: 99px; font-weight: 600; }
+.btn.pri { font-weight: 700; box-shadow: 0 4px 12px rgba(229, 44, 40, .22); }
+.btn.pri:hover { box-shadow: 0 6px 16px rgba(229, 44, 40, .3); }
+:root[data-theme="dark"] .btn.pri { box-shadow: none; }
+.btn.danger { box-shadow: none; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* Tarjetas */
+.panel, .kpi { box-shadow: var(--shadow-card); }
+.sec-chip { border-radius: 16px; }
+.tile { border-radius: 18px; }
+.tile.on { border-width: 2px; box-shadow: none; }
+.tile-c { box-shadow: 0 3px 8px rgba(229, 44, 40, .3); }
+.keypad button { border-radius: 99px; }
+
+/* Movimientos: salida = rojo de marca, anulación = gris */
+.badge.t-salida, .mv-ic.t-salida { background: var(--accent-soft); color: var(--accent); }
+.badge.t-anulacion { background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line); }
+
+/* Guía: íconos en círculo rojo, como los pasos de la web */
+.g-ic { border-radius: 50%; background: var(--accent); color: #fff; }
+.g-hero-ic { border-radius: 50%; }
+.gsec { border-radius: 18px; }
+.gsec[open] { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+
+/* Ingreso */
+.login-art {
+  background: linear-gradient(160deg, #e52c28 0 66%, #c81415 calc(66% + 1px));
+  color: #ffe3e1;
+}
+.login-art h2 { font-size: 46px; font-weight: 800; line-height: 1.02; letter-spacing: -.03em; max-width: 13ch; }
+.login-art p { color: #ffe3e1; font-size: 16px; }
+.ledger div { background: rgba(255, 255, 255, .14); border-radius: 99px; padding: 10px 18px; color: #fff; }
+.ledger .neg { color: #fff; }
+.ledger .pos { color: #fff; }
+.ledger b { background: rgba(0, 0, 0, .14); padding: 1px 10px; border-radius: 99px; }
+.login-top { display: none; margin-bottom: 26px; }
+@media (max-width: 860px) {
+  .login-top { display: block; }
+  .login-form { background: linear-gradient(180deg, var(--accent-soft) 0, var(--bg) 220px); }
+}
+
+/* Retiro del equipo: encabezado blanco como el de la web */
+.pub-top { background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: 0 1px 0 var(--line), 0 6px 18px rgba(40, 20, 20, .05); border-bottom: 0; }
+.pub-top .marca-w { font-size: 18px; }
+.pub-jefe { border-color: var(--accent); color: var(--accent); }
+.pub-jefe:hover { background: var(--accent-soft); border-color: var(--accent); }
+@media (max-width: 420px) {
+  .pub-top { gap: 6px; padding: 8px 10px; }
+  .pub-top .marca-w { font-size: 16px; }
+  .pub-top .marca-iso { width: 26px; height: 26px; }
+}

@@ -1,11 +1,11 @@
 {
-  "name": "Premios Liniers",
-  "short_name": "Premios",
+  "name": "Premios · Más Dueños Liniers",
+  "short_name": "Premios MD",
   "description": "Retiro y stock de premios de la sucursal",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#f2f4f7",
-  "theme_color": "#13203a",
+  "background_color": "#e52c28",
+  "theme_color": "#e52c28",
   "lang": "es",
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },

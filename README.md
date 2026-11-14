@@ -17,6 +17,8 @@ supabase/migracion_02_retiro_rapido.sql   Sectores y Retiro rápido (ejecutar de
 supabase/migracion_03_roles.sql           Roles: jefe de sector (ejecutar después de la 02)
 supabase/migracion_04_retiro_sin_login.sql  Link de retiros del equipo, sin usuario (ejecutar después de la 03)
 supabase/migracion_05_integrantes.sql       Personas de cada equipo y "¿Quién eres?" obligatorio (después de la 04)
+supabase/migracion_06_jefes_y_equipos.sql   Jefes en "¿Quién eres?" y carga inicial de los equipos (después de la 05)
+supabase/migracion_07_jefes_cargan_stock.sql  Los jefes cargan stock y retiran para su equipo (después de la 06)
 ```
 
 ---
@@ -42,7 +44,9 @@ Esto crea todas las tablas, las reglas de seguridad, el tiempo real y el espacio
 6. Y con `supabase/migracion_04_retiro_sin_login.sql` (link de retiros del equipo).
 7. Y con `supabase/migracion_05_integrantes.sql` (personas de cada equipo).
 
-Orden siempre: `schema.sql` → `02` → `03` → `04` → `05`.
+Después, en el mismo orden, `migracion_06_jefes_y_equipos.sql` y `migracion_07_jefes_cargan_stock.sql`.
+
+Orden siempre: `schema.sql` → `02` → `03` → `04` → `05` → `06` → `07`.
 
 ### 3. Configurar el inicio de sesión
 
@@ -100,7 +104,7 @@ Si el administrador se creó antes con una contraseña común, puede entrar con 
 ### Quién puede hacer qué
 
 - **Equipo (con el link):** solo **retirar premios** para su equipo y deshacer su último retiro.
-- **Jefe de sector** (líder de promotores, de salón, de ventas): carga a las personas de su equipo en **Mi equipo** (agregar, corregir nombre, dar de baja) y consulta los retiros, pero **no retira premios**. En **Consumo** ve qué se retiró y quién, con la fecha y la hora exactas, agrupado por día (hoy, semana, mes, mes anterior), y puede exportarlo a Excel o PDF. No puede cargar nada; lo bloquea la base de datos. Un **jefe general** se crea igual pero **sin marcar sectores**, y ve todos.
+- **Jefe de sector** (líder de promotores, de salón, de ventas): carga a las personas de su equipo en **Mi equipo** (agregar, corregir nombre, dar de baja), **carga stock cuando llega mercadería** (**Cargar stock**: solo sumar), **retira premios** para su equipo desde **Retiro rápido** (queda registrado con su nombre) y consulta los retiros. Puede deshacer lo propio durante 10 minutos. **No puede bajar el stock a mano**: ni ajustes, ni correcciones, ni anular movimientos; eso queda solo para administradores. En **Consumo** ve qué se retiró y quién, con la fecha y la hora exactas, agrupado por día (hoy, semana, mes, mes anterior), y puede exportarlo a Excel o PDF. No puede cargar nada; lo bloquea la base de datos. Un **jefe general** se crea igual pero **sin marcar sectores**, y ve todos.
 - **Administrador:** todo (dashboard, stock, ingresos, ajustes, inventario, historial, reportes, usuarios, auditoría, link de retiros).
 
 ### Retiro rápido (reemplazo del grupo de WhatsApp)

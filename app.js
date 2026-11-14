@@ -152,6 +152,9 @@ const badgeEstado = p => {
   return `<span class="badge ${e.c}"><span class="d"></span>${e.t}</span>`;
 };
 const badgeTipo = t => `<span class="badge t-${t}">${ic(TIPOS[t].i)}${TIPOS[t].t}</span>`;
+// Logo Más Dueños: isotipo (si se subió icons/isotipo.png) + "MásDueños"
+const ISOTIPO = ''; // p. ej. 'icons/isotipo.png' cuando se suba el isotipo oficial
+const marca = (sub, cls = '') => `<div class="marca ${cls}">${ISOTIPO ? `<img class="marca-iso" src="${ISOTIPO}" alt="">` : ''}<div style="min-width:0"><div class="marca-w" role="img" aria-label="Más Dueños"><span>Más</span><b>Dueños</b></div>${sub != null ? `<div class="marca-s">${sub}</div>` : ''}</div></div>`;
 const thumb = (p, lg) => `<div class="thumb ${lg ? 'lg' : ''}">${p && p.imagen_url ? `<img src="${esc(p.imagen_url)}" alt="" loading="lazy">` : ic('gift', lg ? 'l' : '')}</div>`;
 const stockSpan = p => `<span data-stock="${p.id}">${fNum(p.stock_actual)}</span>`;
 function lvl(p) {
@@ -408,13 +411,10 @@ async function renderPublico(msg) {
   app().innerHTML = `
     <div class="pub">
       <header class="pub-top">
-        <div class="brand" style="padding:0;min-width:0">
-          <div class="brand-mark">${ic('gift')}</div>
-          <div style="min-width:0"><div class="pub-t">Retiro de premios</div><div class="pub-s">${esc(S.config.nombre_sucursal || '')}</div></div>
-        </div>
+        ${marca('Retiro de premios' + (S.config.nombre_sucursal ? ' · ' + esc(S.config.nombre_sucursal) : ''), 'sm')}
         <span class="sp"></span>
         <button class="btn sm icon" id="pub-ayuda" title="Cómo retirar premios" aria-label="Cómo retirar premios">${ic('circle-help', 's')}</button>
-        <button class="btn sm" id="pub-jefe">${ic('key-round', 's')}¿Eres jefe?</button>
+        <button class="btn sm pub-jefe" id="pub-jefe">${ic('key-round', 's')}¿Eres jefe?</button>
       </header>
       <main class="content pub-main" id="view"></main>
     </div>`;
@@ -532,12 +532,9 @@ async function renderLogin(msg) {
   app().innerHTML = `
   <div class="login">
     <div class="login-art">
-      <div class="brand" style="padding:0">
-        <div class="brand-mark">${ic('gift')}</div>
-        <div><div class="brand-t">Stock de Premios</div><div class="brand-s">Control de premios de la sucursal</div></div>
-      </div>
+      ${marca('Premios · ' + sucursal, 'on-red')}
       <div>
-        <h2>Cada premio que entra o sale, con nombre y hora.</h2>
+        <h2>Cada premio, con nombre y hora.</h2>
         <p>El stock se actualiza al instante para todo el equipo y cada movimiento queda guardado en el historial.</p>
       </div>
       <div class="ledger" aria-hidden="true">
@@ -546,7 +543,7 @@ async function renderLogin(msg) {
         <div>${ic('scale', 's')} Ajuste por inventario<b class="neg">−2</b></div>
       </div>
     </div>
-    <div class="login-form"><div class="login-card" id="lc"></div></div>
+    <div class="login-form"><div class="login-card"><div class="login-top">${marca('Premios · ' + sucursal)}</div><div id="lc"></div></div></div>
   </div>`;
   const lc = $('#lc');
   if (hay) loginPin(lc, msg);
@@ -687,10 +684,7 @@ function renderShell() {
   app().innerHTML = `
   <div class="layout" id="layout">
     <aside class="side" aria-label="Menú principal">
-      <div class="brand">
-        <div class="brand-mark">${ic('gift')}</div>
-        <div style="min-width:0"><div class="brand-t">Stock de Premios</div><div class="brand-s" id="brand-s"></div></div>
-      </div>
+      <div class="brand">${marca('<span id="brand-s"></span>', 'on-red')}</div>
       <nav class="nav" id="nav"></nav>
       <div class="side-foot rel">
         <button class="me" id="me" aria-haspopup="menu"></button>
@@ -757,7 +751,7 @@ function closePops(e) {
   const um = $('#umenu');
   if (um && !um.contains(e.target)) um.remove();
 }
-function paintBrand() { const b = $('#brand-s'); if (b) b.textContent = S.config.nombre_sucursal || 'Sucursal'; }
+function paintBrand() { const b = $('#brand-s'); if (b) b.textContent = 'Premios · ' + (S.config.nombre_sucursal || 'Sucursal'); }
 function paintThemeBtn() {
   const b = $('#theme'); if (!b) return;
   b.innerHTML = ic(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon');
