@@ -483,7 +483,7 @@ function selectorQuien() {
   if (!lista.length) return `<div class="callout warn" style="margin-bottom:12px">${ic('triangle-alert', 's')}<span>Todavía no hay nadie cargado en este equipo. Pide a tu jefe que te agregue en <b>Mi equipo</b>.</span></div>`;
   return `<div class="quien"><label for="rp-quien-sel">¿Quién eres?</label>
     <select class="in quien-sel ${R.integrante ? '' : 'falta'}" id="rp-quien-sel">
-      <option value="">Elige tu nombre</option>${lista.map(x => `<option value="${x.id}" ${x.id === R.integrante ? 'selected' : ''}>${esc(x.nombre)}</option>`).join('')}
+      <option value="">Elige tu nombre</option>${lista.map(x => `<option value="${x.id}" ${x.id === R.integrante ? 'selected' : ''}>${esc(x.nombre)}${x.jefe || x.perfil_id ? ' (jefe)' : ''}</option>`).join('')}
     </select></div>`;
 }
 async function modalNombre() {
@@ -1944,10 +1944,13 @@ VIEWS.equipo = {
     const lista = integrantesDe(f.sector);
     const act = lista.filter(x => x.activo).sort(porNombre), inact = lista.filter(x => !x.activo).sort(porNombre);
     $('#eq-t').textContent = `${act.length} persona(s) en ${sectorLabel(sectorDe(f.sector))}`;
+    act.sort((a, b) => (!!b.perfil_id - !!a.perfil_id) || porNombre(a, b));   // el jefe primero
     const mes = ymd(new Date()).slice(0, 7);
     const uds = {};
     salidasVig().filter(m => m.integrante_id && ymd(m.creado_en).startsWith(mes)).forEach(m => { uds[m.integrante_id] = (uds[m.integrante_id] || 0) + qtyEf(m); });
-    const fila = x => `<li class="${x.activo ? '' : 'void'}"><span class="avatar">${esc(iniciales(x.nombre))}</span>
+    const fila = x => x.perfil_id ? `<li class="${x.activo ? '' : 'void'}"><span class="avatar">${esc(iniciales(x.nombre))}</span>
+      <div class="grow"><div class="t1">${esc(x.nombre)} <span class="tag">Jefe</span></div><div class="t2">${x.activo ? `${fNum(uds[x.id] || 0)} premio(s) retirados este mes · se gestiona desde Usuarios` : 'Dado de baja'}</div></div></li>`
+      : `<li class="${x.activo ? '' : 'void'}"><span class="avatar">${esc(iniciales(x.nombre))}</span>
       <div class="grow"><div class="t1">${esc(x.nombre)}</div><div class="t2">${x.activo ? `${fNum(uds[x.id] || 0)} premio(s) retirados este mes` : 'Dada de baja'}</div></div>
       <div class="acts"><button class="btn" data-int="${x.id}" data-a="ren" title="Corregir nombre" aria-label="Corregir nombre">${ic('pencil', 's')}</button>
       <button class="btn" data-int="${x.id}" data-a="tog" title="${x.activo ? 'Dar de baja' : 'Activar'}" aria-label="${x.activo ? 'Dar de baja' : 'Activar'}">${ic(x.activo ? 'user-x' : 'user-check', 's')}</button></div></li>`;
