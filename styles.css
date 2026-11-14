@@ -625,3 +625,36 @@ body.modo-pub .rap-bar { left: 0; }
   .rap-acts { justify-content: space-between; }
   .rap-go { flex: 0 0 62%; min-width: 0; }
 }
+
+/* ---------- Guías ---------- */
+.guia { max-width: 760px; }
+.g-hero { display: flex; gap: 14px; align-items: center; margin-bottom: 16px; }
+.g-hero h2 { margin: 0; font-size: 20px; }
+.g-hero p { margin: 2px 0 0; color: var(--ink-2); }
+.g-hero-ic { width: 48px; height: 48px; border-radius: 14px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; flex: none; }
+.gsec { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 10px; overflow: hidden; }
+.gsec summary { list-style: none; display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer; font-weight: 600; font-size: 15.5px; -webkit-tap-highlight-color: transparent; }
+.gsec summary::-webkit-details-marker { display: none; }
+.gsec summary .g-t { flex: 1; }
+.g-ic { width: 32px; height: 32px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; flex: none; }
+.g-chev { color: var(--muted); transition: transform .15s; }
+.gsec[open] .g-chev { transform: rotate(180deg); }
+.g-b { padding: 0 16px 16px 60px; color: var(--ink-2); font-size: 15px; }
+.g-b p { margin: 0 0 8px; }
+.g-b b { color: var(--ink); }
+.g-pasos { margin: 0; padding: 0; list-style: none; counter-reset: paso; }
+.g-pasos li { counter-increment: paso; position: relative; padding: 4px 0 8px 34px; line-height: 1.45; }
+.g-pasos li::before { content: counter(paso); position: absolute; left: 0; top: 3px; width: 23px; height: 23px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); font-size: 12.5px; font-weight: 700; display: grid; place-items: center; }
+.g-lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.g-lista li { display: flex; gap: 10px; align-items: center; }
+.g-lista li .ic { color: var(--muted); }
+.g-ir { margin-top: 12px; }
+.g-faq { margin: 0; }
+.g-faq dt { font-weight: 600; color: var(--ink); margin-top: 10px; }
+.g-faq dt:first-child { margin-top: 0; }
+.g-faq dd { margin: 2px 0 0; }
+.g-copy { white-space: pre-line; background: var(--surface-2); border: 1px dashed var(--line-2); border-radius: 10px; padding: 12px; margin: 6px 0 10px; color: var(--ink); font-size: 14.5px; }
+.g-aviso { align-items: center; }
+.g-aviso span { flex: 1; }
+.modal .guia .gsec { border-radius: 12px; }
+@media (max-width: 640px) { .g-b { padding-left: 16px; } }

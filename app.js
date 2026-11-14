@@ -73,6 +73,7 @@ const NAV = [
   { id: 'auditoria',     t: 'Auditoría',            i: 'shield-check',     roles: ['admin'] },
   { sep: 'Cuenta' },
   { id: 'perfil',        t: 'Mi perfil',            i: 'circle-user-round', roles: ['admin', 'usuario'] },
+  { id: 'ayuda',         t: 'Cómo funciona',        i: 'circle-help',      roles: TODOS },
   { id: 'configuracion', t: 'Configuración',        i: 'settings',         roles: TODOS }
 ];
 const ROLES = {
@@ -401,12 +402,14 @@ async function renderPublico(msg) {
           <div style="min-width:0"><div class="pub-t">Retiro de premios</div><div class="pub-s">${esc(S.config.nombre_sucursal || '')}</div></div>
         </div>
         <span class="sp"></span>
+        <button class="btn sm icon" id="pub-ayuda" title="Cómo retirar premios" aria-label="Cómo retirar premios">${ic('circle-help', 's')}</button>
         <button class="btn sm" id="pub-jefe">${ic('key-round', 's')}¿Eres jefe?</button>
       </header>
       <main class="content pub-main" id="view"></main>
     </div>`;
   document.body.classList.add('modo-pub');
   $('#pub-jefe').onclick = () => modalJefe();
+  $('#pub-ayuda').onclick = () => modalGuiaEquipo();
   VIEWS.rapido.mount($('#view'));
   icons();
   if (msg) toast(esc(msg), 'warn', 6000);
@@ -1810,7 +1813,10 @@ VIEWS.consumo = {
     const f = S.f.cons, secs = sectoresConsulta();
     if (f.sector && !secs.some(x => String(x.id) === String(f.sector))) f.sector = '';
     if (secs.length === 1) f.sector = String(secs[0].id);
+    let guiaVista = true;
+    try { guiaVista = !!localStorage.getItem(`sp_guia_vista_${S.perfil.id}`); } catch (er) { /* ignorar */ }
     el.innerHTML = `
+      ${isJefe() && !guiaVista ? `<div class="callout info g-aviso" style="margin-bottom:14px">${ic('book-open', 's')}<span>¿Primera vez? Mira en 2 minutos todo lo que puedes hacer.</span><a class="btn sm pri" href="#/ayuda">Ver guía</a></div>` : ''}
       ${!S.sectores.length ? `<div class="callout warn">${ic('triangle-alert', 's')}<span>Todavía no hay sectores configurados.</span></div>` : ''}
       ${secs.length > 1 ? `<div class="sec-row" id="cs-sec">
           <button class="sec-chip" data-s="">Todos</button>
@@ -2004,6 +2010,147 @@ VIEWS.cargar = {
       : `<li><div class="empty" style="width:100%">${ic('package-plus')}<b>Todavía no cargaste stock</b>Cuando registres un ingreso aparecerá aquí.</div></li>`;
   }
 };
+
+/* =============================================================
+   VISTA: CÓMO FUNCIONA (guías dentro de la app)
+   ============================================================= */
+const gPaso = arr => `<ol class="g-pasos">${arr.map(t => `<li>${t}</li>`).join('')}</ol>`;
+const gIr = (vista, txt) => `<button class="btn sm g-ir" data-ir="${vista}">${txt}${ic('arrow-right', 's')}</button>`;
+const gSec = (icono, titulo, cuerpo, abierta) => `<details class="gsec" ${abierta ? 'open' : ''}><summary><span class="g-ic">${ic(icono, 's')}</span><span class="g-t">${titulo}</span>${ic('chevron-down', 's g-chev')}</summary><div class="g-b">${cuerpo}</div></details>`;
+const gNota = (t, tipo = 'info') => `<div class="callout ${tipo}" style="margin-top:10px">${ic(tipo === 'warn' ? 'triangle-alert' : 'lightbulb', 's')}<span>${t}</span></div>`;
+
+function guiaEquipo() {
+  return gSec('link', 'Abrir la app', gPaso([
+      'Abre el <b>link de retiros</b> que te pasó tu jefe por WhatsApp.',
+      'Guárdalo en la pantalla de inicio del celular para tenerlo a mano (en el menú del navegador: <b>Agregar a pantalla de inicio</b>).',
+      'No necesitas usuario ni contraseña.'
+    ]), true)
+    + gSec('users', 'Elegir tu equipo y tu nombre', gPaso([
+      'La primera vez toca tu equipo: <b>Promoción</b>, <b>Recepción</b>, <b>Pretest</b>, <b>Full test</b>, <b>Host</b> o <b>Ventas</b>.',
+      'En <b>¿Quién eres?</b> elige tu nombre de la lista.',
+      'El celular lo recuerda: la próxima vez ya aparece elegido.'
+    ]) + gNota('Si tu nombre no está en la lista, pídele a tu jefe que te agregue.'))
+    + gSec('zap', 'Retirar premios', gPaso([
+      'Toca el premio que sacas. <b>Cada toque suma 1</b> (el número azul muestra cuántos llevas).',
+      'Si te pasaste, toca el botón <b>–</b> de ese premio.',
+      'Abajo vas a ver lo que elegiste. Toca <b>Registrar</b>.'
+    ]) + gNota('Se guardan solos tu nombre, la fecha y la hora.'))
+    + gSec('undo-2', 'Me equivoqué', gPaso([
+      'Después de registrar aparece un aviso con el botón <b>Deshacer</b>: tócalo y el retiro se cancela.',
+      'Tienes hasta <b>10 minutos</b> y solo funciona desde el mismo celular.',
+      'Si pasó más tiempo, avísale a tu jefe o al administrador.'
+    ]) + gNota('<b>Vaciar</b> borra lo que elegiste antes de registrar (no toca el stock). Si lo tocas sin querer, toca <b>Deshacer</b>.'));
+}
+
+function guiaJefes() {
+  return gSec('log-in', 'Entrar y salir', gPaso([
+      'Abre el link de retiros en tu celular.',
+      'Arriba a la derecha toca <b>¿Eres jefe?</b>',
+      'Toca tu nombre y escribe tu <b>PIN</b>.',
+      'Para salir: menú (☰) › tu nombre abajo › <b>Cerrar sesión</b>.'
+    ]) + gNota('La sesión queda abierta en tu teléfono: no tienes que poner el PIN cada vez.'), true)
+    + gSec('zap', 'Retirar premios', gPaso([
+      'Entra a <b>Retiro rápido</b>. Tu equipo ya viene elegido.',
+      'Toca cada premio que sacas (cada toque suma 1). Con <b>–</b> restas.',
+      'Toca <b>Registrar</b>.'
+    ]) + gNota('Queda registrado con tu nombre, la fecha y la hora. Tienes <b>Deshacer</b> durante 10 minutos.') + gIr('rapido', 'Ir a Retiro rápido'))
+    + gSec('package-plus', 'Cargar stock cuando llega mercadería', gPaso([
+      'Entra a <b>Cargar stock</b> (o toca <b>Cargar</b> en el premio, dentro de Stock de Premios).',
+      'Elige el premio y escribe <b>cuántas unidades llegaron</b>.',
+      'Si quieres, anota el remito o el proveedor en <b>Observación</b>.',
+      'Toca <b>Registrar ingreso</b> y confirma.'
+    ]) + gNota('Revisa bien el premio antes de confirmar: hay cajas con nombres parecidos (por ejemplo, turrones Fulbito y turrones Misky). Si te equivocas, toca <b>Deshacer</b> dentro de los 10 minutos.', 'warn') + gIr('cargar', 'Ir a Cargar stock'))
+    + gSec('users-round', 'Mi equipo: tu lista de personas', `
+      <p>Son las personas que aparecen en <b>¿Quién eres?</b> cuando tu equipo retira premios.</p>
+      <ul class="g-lista">
+        <li>${ic('plus', 's')}<span><b>Agregar</b>: escribe nombre y apellido y toca Agregar.</span></li>
+        <li>${ic('list-plus', 's')}<span><b>Agregar varios</b>: pega la lista entera, un nombre por línea.</span></li>
+        <li>${ic('pencil', 's')}<span><b>Lápiz</b>: corregir un nombre.</span></li>
+        <li>${ic('user-x', 's')}<span><b>Dar de baja</b>: para quien ya no está. Sus retiros quedan guardados.</span></li>
+      </ul>` + gNota('Tú apareces solo en la lista, marcado como "(jefe)".') + gIr('equipo', 'Ir a Mi equipo'))
+    + gSec('chart-pie', 'Consumo: qué se retiró y quién', gPaso([
+      'Entra a <b>Consumo por sector</b>.',
+      'Elige el período: <b>Hoy</b>, <b>Esta semana</b>, <b>Este mes</b> o <b>Mes anterior</b>.',
+      'Arriba ves el total de unidades, la cantidad de retiros y cuántas personas retiraron.',
+      '<b>Qué se retiró</b> y <b>Quién retiró</b> muestran los totales por premio y por persona.',
+      'En <b>Detalle de retiros</b> está cada retiro con <b>fecha y hora</b>, ordenado por día.',
+      'Con <b>Excel</b> o <b>PDF</b> descargas el listado.'
+    ]) + gIr('consumo', 'Ir a Consumo'))
+    + gSec('boxes', 'Stock de premios', `
+      <p>Muestra cuánto queda de cada premio:</p>
+      <ul class="g-lista">
+        <li><span class="badge ok"><span class="d"></span>Stock correcto</span><span>hay suficiente.</span></li>
+        <li><span class="badge low"><span class="d"></span>Stock bajo</span><span>llegó al mínimo: hay que reponer.</span></li>
+        <li><span class="badge out"><span class="d"></span>Sin stock</span><span>no queda nada.</span></li>
+      </ul>` + gIr('stock', 'Ir a Stock de Premios'))
+    + gSec('key-round', 'Cambiar tu PIN', gPaso([
+      'Entra a <b>Configuración</b>.',
+      'En <b>Mi PIN</b> escribe el nuevo (4 a 6 números) dos veces.',
+      'Toca <b>Cambiar mi PIN</b>.'
+    ]) + gNota('Si olvidaste tu PIN, pídele uno nuevo al administrador.') + gIr('configuracion', 'Ir a Configuración'))
+    + gSec('shield-alert', 'Lo que no puedes hacer', `
+      <p>Para que el stock sea confiable, el stock solo baja con un retiro registrado. Por eso los jefes <b>no pueden</b>:</p>
+      <ul class="g-lista">
+        <li>${ic('x', 's')}<span>Bajar o ajustar el stock a mano.</span></li>
+        <li>${ic('x', 's')}<span>Corregir o anular retiros de otras personas.</span></li>
+        <li>${ic('x', 's')}<span>Deshacer algo pasados los 10 minutos.</span></li>
+      </ul>` + gNota('Para cualquiera de estas cosas, avísale al administrador: lo corrige desde el Historial y queda registrado.'))
+    + gSec('circle-help', 'Problemas comunes', `
+      <dl class="g-faq">
+        <dt>Alguien de mi equipo no aparece en "¿Quién eres?"</dt><dd>Agrégalo en <b>Mi equipo</b>. Aparece al instante.</dd>
+        <dt>Dice "Stock insuficiente"</dt><dd>Quedan menos unidades de las que se quieren sacar. Si llegó mercadería, primero cárgala en <b>Cargar stock</b>.</dd>
+        <dt>Registré un retiro o una carga de más</dt><dd>Toca <b>Deshacer</b> en el aviso (10 minutos). Después, avísale al administrador.</dd>
+        <dt>Dice "Este link ya no funciona"</dt><dd>El administrador generó un link nuevo. Pídeselo.</dd>
+        <dt>No veo los cambios nuevos de la app</dt><dd>Cierra la pestaña del navegador y ábrela de nuevo.</dd>
+      </dl>`)
+    + gSec('send', 'Cómo explicarle al equipo', `
+      <p>Tu equipo no necesita usuario ni PIN. Pásales esto:</p>
+      <div class="g-copy" id="g-copy">1) Abran el link de retiros que está en el grupo.
+2) Elijan su equipo y su nombre en "¿Quién eres?" (solo la primera vez).
+3) Toquen los premios que sacan (cada toque suma 1).
+4) Toquen Registrar.
+Si se equivocan, toquen Deshacer (tienen 10 minutos).</div>
+      <button class="btn sm" id="g-copiar">${ic('copy', 's')}Copiar instrucciones</button>`);
+}
+
+VIEWS.ayuda = {
+  title: () => 'Cómo funciona',
+  mount(el) {
+    const f = S.f.ayuda || (S.f.ayuda = { cual: isAdmin() ? 'jefes' : isJefe() ? 'jefes' : 'equipo' });
+    const opciones = isAdmin() ? [['jefes', 'Guía para jefes'], ['equipo', 'Guía para el equipo']] : null;
+    el.innerHTML = `
+      <div class="guia">
+        <div class="g-hero">
+          <span class="g-hero-ic">${ic('book-open', 'l')}</span>
+          <div><h2>${isJefe() ? `Hola, ${esc((S.perfil.nombre_completo || '').split(' ')[0])}` : 'Cómo funciona la app'}</h2>
+          <p id="g-sub"></p></div>
+        </div>
+        ${opciones ? `<div class="chips" id="g-cual" style="margin-bottom:14px">${opciones.map(([k, t]) => `<button class="chip" data-g="${k}">${t}</button>`).join('')}</div>` : ''}
+        <div id="g-body"></div>
+      </div>`;
+    el.onclick = e => {
+      const g = e.target.closest('[data-g]'); if (g) { f.cual = g.dataset.g; this.paint(); icons(); return; }
+      const ir = e.target.closest('[data-ir]'); if (ir) { go(ir.dataset.ir); return; }
+      if (e.target.closest('#g-copiar')) {
+        const t = $('#g-copy').innerText;
+        (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('Instrucciones copiadas. Pégalas en el grupo.', 'ok', 3000))
+          .catch(() => { const r = document.createRange(); r.selectNodeContents($('#g-copy')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); toast('Texto seleccionado: cópialo.', 'info', 3000); });
+      }
+    };
+    try { localStorage.setItem(`sp_guia_vista_${S.perfil.id}`, '1'); } catch (er) { /* ignorar */ }
+    this.paint();
+  },
+  paint() {
+    const f = S.f.ayuda, body = $('#g-body'); if (!body) return;
+    $$('#g-cual [data-g]').forEach(b => b.classList.toggle('on', b.dataset.g === f.cual));
+    const jefes = f.cual === 'jefes';
+    $('#g-sub').textContent = jefes ? 'Todo lo que puedes hacer como jefe de sector. Toca cada tema para ver los pasos.' : 'Así retira premios el equipo con el link, sin usuario ni PIN.';
+    body.innerHTML = jefes ? guiaJefes() : guiaEquipo();
+  }
+};
+function modalGuiaEquipo() {
+  modal({ title: 'Cómo retirar premios', size: 'lg', body: `<div class="guia">${guiaEquipo()}</div>`, foot: `<button class="btn pri" data-close>Entendido</button>` });
+}
 
 /* =============================================================
    VISTA: HISTORIAL
