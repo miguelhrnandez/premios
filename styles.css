@@ -604,3 +604,9 @@ body.modo-pub .rap-bar { left: 0; }
 .jefe-b { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 6px; border: 0; background: none; text-align: left; cursor: pointer; border-radius: 10px; color: var(--ink); }
 .jefe-b:hover { background: var(--surface-2); }
 .jefe-b .t2 { font-size: 13px; color: var(--muted); }
+
+/* ¿Quién eres? */
+.quien { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; max-width: 420px; }
+.quien label { font-weight: 600; font-size: 15px; }
+.quien-sel { height: 50px; font-size: 17px; font-weight: 600; }
+.quien-sel.falta { border-color: var(--low-dot); box-shadow: 0 0 0 3px var(--low-bg); }

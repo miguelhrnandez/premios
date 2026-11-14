@@ -62,6 +62,7 @@ const NAV = [
   { id: 'dashboard',     t: 'Dashboard',            i: 'layout-dashboard', roles: ['admin'] },
   { id: 'rapido',        t: 'Retiro rápido',        i: 'zap',              roles: ['admin', 'usuario'] },
   { id: 'consumo',       t: 'Consumo por sector',   i: 'chart-pie',        roles: ['admin', 'supervisor'] },
+  { id: 'equipo',        t: 'Mi equipo',            i: 'users-round',      roles: ['admin', 'supervisor'] },
   { id: 'stock',         t: 'Stock de Premios',     i: 'boxes',            roles: TODOS },
   { id: 'movimiento',    t: 'Registrar Movimiento', i: 'arrow-left-right', roles: ['admin'] },
   { id: 'historial',     t: 'Historial',            i: 'history',          roles: ['admin'] },
@@ -214,6 +215,9 @@ function createAPI(sb) {
     premios: () => all(() => sb.from('premios').select('*').order('nombre')),
     async categorias() { return T(await sb.from('categorias').select('*').order('nombre')); },
     async sectores() { return T(await sb.from('sectores').select('*').order('orden')); },
+    async integrantes() { return T(await sb.from('integrantes').select('*').order('nombre')); },
+    async crearIntegrante(d) { return T(await sb.from('integrantes').insert(d).select().single()); },
+    async editarIntegrante(id, d) { return T(await sb.from('integrantes').update(d).eq('id', id).select().single()); },
     async crearSector(d) { return T(await sb.from('sectores').insert(d).select().single()); },
     async editarSector(id, d) { return T(await sb.from('sectores').update(d).eq('id', id).select().single()); },
     async perfiles() { return T(await sb.from('perfiles').select('*').order('nombre_completo')); },
@@ -249,7 +253,7 @@ function createAPI(sb) {
     async cambiarMiPassword(p) { T(await sb.auth.updateUser({ password: p })); },
     subscribe(h) {
       const ch = sb.channel('stock-premios-rt');
-      ['premios', 'movimientos', 'alertas', 'categorias', 'configuracion', 'sectores'].forEach(t =>
+      ['premios', 'movimientos', 'alertas', 'categorias', 'configuracion', 'sectores', 'integrantes'].forEach(t =>
         ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, p => h.change(t, p)));
       ch.subscribe(st => h.status(st));
       return () => { try { sb.removeChannel(ch); } catch (e) { /* ignorar */ } };
@@ -304,11 +308,12 @@ async function enter(user) {
 }
 
 async function loadAll() {
-  const [premios, categorias, perfiles, config, movs, alertas, sectores] = await Promise.all([
+  const [premios, categorias, perfiles, config, movs, alertas, sectores, integrantes] = await Promise.all([
     API.premios(), API.categorias(), API.perfiles(), API.config(), API.movimientos(), API.alertas(),
-    API.sectores ? API.sectores().catch(() => []) : Promise.resolve([])
+    API.sectores ? API.sectores().catch(() => []) : Promise.resolve([]),
+    API.integrantes ? API.integrantes().catch(() => []) : Promise.resolve([])
   ]);
-  Object.assign(S, { premios, categorias, perfiles, config, movs, alertas, sectores, lastSync: Date.now() });
+  Object.assign(S, { premios, categorias, perfiles, config, movs, alertas, sectores, integrantes, lastSync: Date.now() });
   const me = perfiles.find(p => p.id === S.perfil.id);
   if (me) S.perfil = me;
 }
@@ -360,6 +365,7 @@ async function cargarCatalogo() {
   S.premios.forEach(p => { if (antes.has(p.id) && antes.get(p.id) !== p.stock_actual) flash(p.id, p.stock_actual - antes.get(p.id)); });
   S.sectores = (c.sectores || []).map(x => ({ ...x, activo: true }));
   S.frecuentes = c.frecuentes || [];
+  S.integrantes = c.integrantes || [];
   S.config.nombre_sucursal = c.sucursal || '';
   const cart = S.rap.cart;
   S.premios.forEach(p => { if (cart[p.id] > p.stock_actual) { if (p.stock_actual > 0) cart[p.id] = p.stock_actual; else delete cart[p.id]; } });
@@ -463,6 +469,23 @@ async function modalJefe() {
   elegir();
 }
 
+function integranteRecordado() {
+  const R = S.rap;
+  const lista = integrantesDe(R.sector).filter(x => x.activo !== false);
+  if (R.integrante && lista.some(x => x.id === R.integrante)) return;
+  let id = null;
+  try { id = Number(localStorage.getItem(`sp_integrante_${R.sector}`)) || null; } catch (e) { /* ignorar */ }
+  R.integrante = lista.some(x => x.id === id) ? id : null;
+}
+function selectorQuien() {
+  const R = S.rap;
+  const lista = integrantesDe(R.sector).filter(x => x.activo !== false).sort(porNombre);
+  if (!lista.length) return `<div class="callout warn" style="margin-bottom:12px">${ic('triangle-alert', 's')}<span>Todavía no hay nadie cargado en este equipo. Pide a tu jefe que te agregue en <b>Mi equipo</b>.</span></div>`;
+  return `<div class="quien"><label for="rp-quien-sel">¿Quién eres?</label>
+    <select class="in quien-sel ${R.integrante ? '' : 'falta'}" id="rp-quien-sel">
+      <option value="">Elige tu nombre</option>${lista.map(x => `<option value="${x.id}" ${x.id === R.integrante ? 'selected' : ''}>${esc(x.nombre)}</option>`).join('')}
+    </select></div>`;
+}
 async function modalNombre() {
   const md = modal({
     title: '¿Cómo te llamas?',
@@ -1593,13 +1616,20 @@ VIEWS.rapido = {
       if (e.target.id === 'rp-q') { R.q = e.target.value; this.paintGrid(); icons(); }
       if (e.target.id === 'rp-obs') R.obs = e.target.value;
     };
+    el.onchange = e => {
+      if (e.target.id !== 'rp-quien-sel') return;
+      R.integrante = e.target.value ? +e.target.value : null;
+      try { localStorage.setItem(`sp_integrante_${R.sector}`, e.target.value); } catch (er) { /* ignorar */ }
+      e.target.classList.toggle('falta', !R.integrante);
+      this.paintBar(); icons();
+    };
     this.paint();
   },
   click(e) {
     const R = S.rap, t = e.target;
     const sec = t.closest('[data-sec]');
     if (sec) {
-      R.sector = +sec.dataset.sec;
+      R.sector = +sec.dataset.sec; R.integrante = null;
       try { localStorage.setItem(lsSector(), String(R.sector)); } catch (er) { /* ignorar */ }
       this.paint(); icons(); return;
     }
@@ -1617,9 +1647,10 @@ VIEWS.rapido = {
     }
     const rm = t.closest('[data-rm]');
     if (rm) { delete R.cart[rm.dataset.rm]; this.paintGrid(); this.paintBar(); icons(); return; }
-    if (t.closest('#rp-nombre')) { modalNombre(); return; }
+    if (t.closest('#rp-quien-sel')) return;
     if (t.closest('#rp-clear')) { R.cart = {}; R.obs = ''; R.nota = false; this.paintGrid(); this.paintBar(); icons(); return; }
     if (t.closest('#rp-nota')) { R.nota = !R.nota; this.paintBar(); icons(); if (R.nota) setTimeout(() => $('#rp-obs') && $('#rp-obs').focus(), 30); return; }
+    if (t.closest('#rp-go-falta')) { const s = $('#rp-quien-sel'); if (s) { s.classList.add('falta'); s.scrollIntoView({ behavior: 'smooth', block: 'center' }); s.focus(); } toast('Elige tu nombre en "¿Quién eres?".', 'warn', 3000); return; }
     if (t.closest('#rp-go')) this.submit();
   },
   paint() {
@@ -1628,6 +1659,7 @@ VIEWS.rapido = {
   },
   paintSec() {
     const R = S.rap, secs = sectoresRetiro();
+    if (S.publico) integranteRecordado();
     if (!S.sectores.length) {
       $('#rp-sec').innerHTML = `<div class="callout warn">${ic('triangle-alert', 's')}<span>Faltan los sectores en la base de datos. ${isAdmin() ? 'Ejecuta el archivo <b>migracion_02_retiro_rapido.sql</b> en Supabase (ver README).' : 'Avisa a un administrador.'}</span></div>`;
       return;
@@ -1637,7 +1669,7 @@ VIEWS.rapido = {
         <div class="sec-grid">${secs.map(x => `<button class="sec-big" data-sec="${x.id}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>`;
       return;
     }
-    const quien = S.publico ? `<button class="nombre-b" id="rp-nombre">${ic('user-round', 's')}${nombreEquipo() ? `Retira: <b>${esc(nombreEquipo())}</b>` : 'Agregar mi nombre (opcional)'}${ic('pencil', 's')}</button>` : '';
+    const quien = S.publico ? selectorQuien() : '';
     if (secs.length === 1) { $('#rp-sec').innerHTML = `<div class="sec-fijo">${ic('map-pin', 's')}Retiras para <b>${esc(sectorLabel(secs[0]))}</b></div>${quien}`; return; }
     $('#rp-sec').innerHTML = `<div class="sec-row" role="radiogroup" aria-label="Sector">${secs.map(x => `
       <button class="sec-chip ${x.id === R.sector ? 'on' : ''}" data-sec="${x.id}" role="radio" aria-checked="${x.id === R.sector}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>${quien}`;
@@ -1691,7 +1723,9 @@ VIEWS.rapido = {
       <div class="rap-acts">
         <button class="btn icon ${R.nota || R.obs ? 'on-note' : ''}" id="rp-nota" title="Agregar nota" aria-label="Agregar nota">${ic('message-square-text')}</button>
         ${tot ? `<button class="btn icon" id="rp-clear" title="Vaciar" aria-label="Vaciar">${ic('trash-2')}</button>` : ''}
-        <button class="btn pri lg rap-go" id="rp-go" ${tot ? '' : 'disabled'}>${tot ? `Registrar ${tot}` : 'Registrar'}</button>
+        ${S.publico && !R.integrante && tot
+          ? `<button class="btn pri lg rap-go" id="rp-go-falta">${ic('user-round', 's')}Elige tu nombre</button>`
+          : `<button class="btn pri lg rap-go" id="rp-go" ${tot ? '' : 'disabled'}>${tot ? `Registrar ${tot}` : 'Registrar'}</button>`}
       </div>`;
   },
   async submit() {
@@ -1702,7 +1736,7 @@ VIEWS.rapido = {
     await busy($('#rp-go'), async () => {
       try {
         const movs = S.publico
-          ? await API.rpc('retiro_publico', { p_codigo: codigo(), p_sector_id: R.sector, p_items: items, p_nombre: nombreEquipo() || null, p_observacion: (R.obs || '').trim() || null, p_dispositivo: dispositivo() })
+          ? await API.rpc('retiro_publico', { p_codigo: codigo(), p_sector_id: R.sector, p_items: items, p_integrante_id: R.integrante, p_observacion: (R.obs || '').trim() || null, p_dispositivo: dispositivo() })
           : await API.rpc('registrar_retiro_rapido', { p_sector_id: R.sector, p_items: items, p_observacion: (R.obs || '').trim() || null });
         const lista = Array.isArray(movs) ? movs : [movs];
         lista.forEach(aplicarMovLocal);
@@ -1711,7 +1745,8 @@ VIEWS.rapido = {
         R.cart = {}; R.obs = ''; R.nota = false;
         this.paintGrid(); this.paintBar(); icons(); applyFlashes(); updateNavBadge();
         const ids = lista.map(m => m.id);
-        toast(`<b>Listo: ${tot} premio(s) para ${esc(sectorLabel(sector))}.</b><br>${detalle}`, 'ok', 10000, {
+        const quienTxt = S.publico ? ((S.integrantes || []).find(x => x.id === R.integrante) || {}).nombre : '';
+        toast(`<b>Listo${quienTxt ? `, ${esc(quienTxt.split(' ')[0])}` : ''}: ${tot} premio(s) para ${esc(sectorLabel(sector))}.</b><br>${detalle}`, 'ok', 10000, {
           label: 'Deshacer',
           onClick: async () => {
             try {
@@ -1825,6 +1860,99 @@ VIEWS.consumo = {
     }).join('')
       : `<li><div class="empty" style="width:100%">${ic('inbox')}<b>No hubo retiros en este período</b>Prueba con otro período o sector.</div></li>`;
     $('#cs-more').innerHTML = rows.length > f.n ? `<span>${vis.length} de ${fNum(rows.length)}</span><span class="sp"></span><button class="btn sm" id="cs-mas">Ver más</button>` : `<span>${fNum(rows.length)} retiro(s)</span>`;
+  }
+};
+
+/* =============================================================
+   VISTA: MI EQUIPO (jefes cargan a las personas de su sector)
+   ============================================================= */
+const integrantesDe = sid => (S.integrantes || []).filter(x => String(x.sector_id) === String(sid));
+const porNombre = (a, b) => a.nombre.localeCompare(b.nombre, 'es', { sensitivity: 'base' });
+VIEWS.equipo = {
+  title: () => 'Mi equipo',
+  secs() { return (isAdmin() ? S.sectores.slice().sort((a, b) => a.orden - b.orden) : sectoresConsulta()).filter(x => x.activo); },
+  mount(el) {
+    const f = S.f.eq || (S.f.eq = { sector: '' });
+    const secs = this.secs();
+    if (!secs.some(x => String(x.id) === String(f.sector))) f.sector = secs.length ? String(secs[0].id) : '';
+    el.innerHTML = `
+      <div class="page-head"><p>Las personas de cada equipo. Aparecen en orden alfabético en <b>"¿Quién eres?"</b> cuando retiran premios con el link.</p></div>
+      ${!secs.length ? `<div class="callout warn">${ic('triangle-alert', 's')}<span>No tienes sectores asignados. Pide a un administrador que te asigne uno.</span></div>`
+        : secs.length > 1 ? `<div class="sec-row" id="eq-sec">${secs.map(x => `<button class="sec-chip" data-s="${x.id}">${x.grupo ? `<small>${esc(x.grupo)}</small>` : ''}${esc(x.nombre)}</button>`).join('')}</div>`
+        : `<div class="sec-fijo">${ic('map-pin', 's')}Equipo <b>${esc(sectorLabel(secs[0]))}</b></div>`}
+      ${secs.length ? `<div class="panel">
+        <div class="panel-h"><h2 id="eq-t"></h2><span class="sp"></span><button class="btn sm" id="eq-varios">${ic('list-plus', 's')}Agregar varios</button></div>
+        <div class="panel-b"><form id="eq-f" class="row" style="flex-wrap:nowrap">
+          <input class="in" id="eq-n" placeholder="Nombre y apellido" maxlength="60" autocomplete="off" autocapitalize="words">
+          <button class="btn pri" id="eq-add">${ic('plus', 's')}Agregar</button></form></div>
+        <ul class="list" id="eq-list"></ul></div>` : ''}`;
+    if (!secs.length) return;
+    el.onclick = e => {
+      const s = e.target.closest('[data-s]'); if (s) { f.sector = s.dataset.s; this.paint(); icons(); return; }
+      const b = e.target.closest('[data-int]'); if (!b) return;
+      const x = (S.integrantes || []).find(y => y.id === +b.dataset.int); if (!x) return;
+      if (b.dataset.a === 'tog') this.toggle(x); else this.renombrar(x);
+    };
+    $('#eq-f').onsubmit = e => { e.preventDefault(); this.agregar([$('#eq-n').value]); };
+    $('#eq-varios').onclick = () => {
+      const md = modal({ title: 'Agregar varias personas', body: `<div class="stack"><p class="muted" style="margin:0">Escribe un nombre por línea. Se agregan a <b>${esc(sectorLabel(sectorDe(f.sector)))}</b>.</p>
+        <textarea class="in" id="eq-ta" rows="8" placeholder="Lucas Díaz&#10;Ana Torres&#10;Martín Gómez"></textarea></div>`,
+        foot: `<button class="btn" data-close>Cancelar</button><button class="btn pri" id="eq-ok">Agregar</button>` });
+      md.$('#eq-ok').onclick = () => busy(md.$('#eq-ok'), async () => { await this.agregar(md.$('#eq-ta').value.split(/\n|,/)); md.close(); });
+    };
+    this.paint();
+  },
+  async agregar(nombres) {
+    const f = S.f.eq;
+    const existentes = new Set(integrantesDe(f.sector).map(x => norm(x.nombre)));
+    const limpios = [...new Set(nombres.map(n => n.trim().replace(/\s+/g, ' ')).filter(n => n.length >= 2))];
+    const nuevos = limpios.filter(n => !existentes.has(norm(n)));
+    if (!limpios.length) return toast('Escribe un nombre.', 'warn', 2500);
+    if (!nuevos.length) return toast('Esa persona ya está en el equipo.', 'warn', 3000);
+    let ok = 0, err = '';
+    await busy($('#eq-add'), async () => {
+      for (const nombre of nuevos) {
+        try { S.integrantes.push(await API.crearIntegrante({ sector_id: +f.sector, nombre: nombre.slice(0, 60), creado_por: S.perfil.id })); ok++; }
+        catch (e) { err = /integrantes_sector_id_nombre_key/.test(e.message || '') ? `${nombre} ya existe.` : errMsg(e); }
+      }
+    });
+    if ($('#eq-n')) { $('#eq-n').value = ''; $('#eq-n').focus(); }
+    this.paint(); icons();
+    if (ok) toast(ok === 1 ? `Agregaste a <b>${esc(nuevos[0])}</b>.` : `Agregaste ${ok} personas.`, 'ok', 3000);
+    if (err) toast(esc(err), 'bad', 5000);
+  },
+  async toggle(x) {
+    if (x.activo && !(await confirmar({ title: 'Dar de baja', ok: 'Dar de baja',
+      body: `<p><b>${esc(x.nombre)}</b> ya no aparecerá en "¿Quién eres?". Sus retiros quedan en el historial y puedes volver a activarla cuando quieras.</p>` }))) return;
+    try { Object.assign(x, await API.editarIntegrante(x.id, { activo: !x.activo })); this.paint(); icons(); toast(x.activo ? `${esc(x.nombre)} está activa de nuevo.` : `${esc(x.nombre)} fue dada de baja.`, 'ok', 3000); }
+    catch (e) { toast(esc(errMsg(e)), 'bad'); }
+  },
+  renombrar(x) {
+    const md = modal({ title: 'Corregir nombre', body: `<div class="field"><label for="rn-i">Nombre y apellido</label><input class="in" id="rn-i" maxlength="60" value="${esc(x.nombre)}"></div>`,
+      foot: `<button class="btn" data-close>Cancelar</button><button class="btn pri" id="rn-ok">Guardar</button>` });
+    md.$('#rn-ok').onclick = () => busy(md.$('#rn-ok'), async () => {
+      const n = md.$('#rn-i').value.trim().replace(/\s+/g, ' ');
+      if (n.length < 2) return;
+      try { Object.assign(x, await API.editarIntegrante(x.id, { nombre: n })); md.close(); this.paint(); icons(); toast('Nombre actualizado.', 'ok', 2500); }
+      catch (e) { toast(esc(/integrantes_sector_id_nombre_key/.test(e.message || '') ? 'Ya hay alguien con ese nombre en el equipo.' : errMsg(e)), 'bad'); }
+    });
+  },
+  paint() {
+    const box = $('#eq-list'); if (!box) return;
+    const f = S.f.eq;
+    $$('#eq-sec [data-s]').forEach(b => b.classList.toggle('on', b.dataset.s === String(f.sector)));
+    const lista = integrantesDe(f.sector);
+    const act = lista.filter(x => x.activo).sort(porNombre), inact = lista.filter(x => !x.activo).sort(porNombre);
+    $('#eq-t').textContent = `${act.length} persona(s) en ${sectorLabel(sectorDe(f.sector))}`;
+    const mes = ymd(new Date()).slice(0, 7);
+    const uds = {};
+    salidasVig().filter(m => m.integrante_id && ymd(m.creado_en).startsWith(mes)).forEach(m => { uds[m.integrante_id] = (uds[m.integrante_id] || 0) + qtyEf(m); });
+    const fila = x => `<li class="${x.activo ? '' : 'void'}"><span class="avatar">${esc(iniciales(x.nombre))}</span>
+      <div class="grow"><div class="t1">${esc(x.nombre)}</div><div class="t2">${x.activo ? `${fNum(uds[x.id] || 0)} premio(s) retirados este mes` : 'Dada de baja'}</div></div>
+      <div class="acts"><button class="btn" data-int="${x.id}" data-a="ren" title="Corregir nombre" aria-label="Corregir nombre">${ic('pencil', 's')}</button>
+      <button class="btn" data-int="${x.id}" data-a="tog" title="${x.activo ? 'Dar de baja' : 'Activar'}" aria-label="${x.activo ? 'Dar de baja' : 'Activar'}">${ic(x.activo ? 'user-x' : 'user-check', 's')}</button></div></li>`;
+    box.innerHTML = act.length || inact.length ? act.map(fila).join('') + inact.map(fila).join('')
+      : `<li><div class="empty" style="width:100%">${ic('users')}<b>Todavía no hay nadie en este equipo</b>Agrega a las personas para que aparezcan en "¿Quién eres?".</div></li>`;
   }
 };
 
@@ -2383,7 +2511,7 @@ VIEWS.usuarios = {
   mount(el) {
     const f = S.f.usr;
     el.innerHTML = `
-      <div class="callout info" style="margin-bottom:14px">${ic('info', 's')}<span>El equipo (promotores, salón, ventas) <b>no necesita usuario</b>: retira con el link de retiros. <a href="#/configuracion">Ver el link</a>.</span></div>
+      <div class="callout info" style="margin-bottom:14px">${ic('info', 's')}<span>El equipo (promotores, salón, ventas) <b>no necesita usuario</b>: retira con el link de retiros y elige su nombre. Las personas de cada equipo se cargan en <a href="#/equipo">Mi equipo</a>.</span></div>
       <div class="page-head"><p>Aquí van los jefes de sector y los administradores, que entran con su PIN desde "¿Eres jefe?". Los usuarios con historial no se eliminan: se desactivan para conservar la trazabilidad.</p><span class="sp"></span>
         <button class="btn pri" id="u-new">${ic('user-plus')}Nuevo usuario</button></div>
       <div class="panel">
@@ -2918,6 +3046,8 @@ function onChange(table, p) {
     else if (ev === 'UPDATE' && i >= 0) S.movs[i] = n;
   } else if (table === 'alertas' && ev === 'INSERT') {
     if (!S.alertas.some(a => a.id === n.id)) { S.alertas.unshift(n); toastAlerta(n); updateBell(); }
+  } else if (table === 'integrantes') {
+    API.integrantes().then(x => { S.integrantes = x; paintCurrent(); }).catch(() => {});
   } else if (table === 'sectores') {
     API.sectores().then(x => { S.sectores = x; paintCurrent(); }).catch(() => {});
   } else if (table === 'categorias') {

@@ -16,6 +16,7 @@ supabase/schema.sql   Base de datos completa: tablas, seguridad, funciones, audi
 supabase/migracion_02_retiro_rapido.sql   Sectores y Retiro rápido (ejecutar después de schema.sql)
 supabase/migracion_03_roles.sql           Roles: jefe de sector (ejecutar después de la 02)
 supabase/migracion_04_retiro_sin_login.sql  Link de retiros del equipo, sin usuario (ejecutar después de la 03)
+supabase/migracion_05_integrantes.sql       Personas de cada equipo y "¿Quién eres?" obligatorio (después de la 04)
 ```
 
 ---
@@ -39,8 +40,9 @@ Esto crea todas las tablas, las reglas de seguridad, el tiempo real y el espacio
 4. Abre otra **New query**, pega el contenido de `supabase/migracion_02_retiro_rapido.sql` y presiona **Run**. Agrega los sectores (Promoción; Salón: Recepción, Pretest, Full test; Ventas) y el Retiro rápido. Se puede ejecutar de nuevo sin problema: no borra datos.
 5. Haz lo mismo con `supabase/migracion_03_roles.sql` (roles y sectores por usuario).
 6. Y con `supabase/migracion_04_retiro_sin_login.sql` (link de retiros del equipo).
+7. Y con `supabase/migracion_05_integrantes.sql` (personas de cada equipo).
 
-Orden siempre: `schema.sql` → `migracion_02` → `migracion_03` → `migracion_04`.
+Orden siempre: `schema.sql` → `02` → `03` → `04` → `05`.
 
 ### 3. Configurar el inicio de sesión
 
@@ -77,7 +79,8 @@ La clave publicable es pública por diseño: la seguridad la garantizan las regl
 2. Completa nombre, usuario y un **PIN** de 4 a 6 números (para el administrador conviene 6). Esa cuenta queda como **Administrador**.
 3. En **Configuración** revisa el nombre de la sucursal y las categorías.
 4. En **Usuarios › Nuevo usuario** crea solo a los **jefes de sector** (líder de promotores, de salón, de ventas) y a otros administradores, cada uno con su PIN. El equipo no necesita usuario.
-5. En **Configuración › Link de retiros del equipo** toca **Compartir por WhatsApp** y mándalo al grupo. Cada persona lo abre una vez en su teléfono y ya puede retirar.
+5. Cada jefe entra con su PIN y en **Mi equipo** carga a las personas de su equipo (con **Agregar varios** puede pegar la lista entera, un nombre por línea).
+6. En **Configuración › Link de retiros del equipo** toca **Compartir por WhatsApp** y mándalo al grupo. Cada persona lo abre una vez en su teléfono y ya puede retirar.
 5. En **Stock de Premios › Nuevo premio** carga los premios (con stock inicial, que se registra como ingreso).
 
 ---
@@ -86,7 +89,7 @@ La clave publicable es pública por diseño: la seguridad la garantizan las regl
 
 ### Cómo entra cada uno
 
-- **El equipo (promotores, salón, ventas): sin usuario ni PIN.** Abre el **link de retiros** una vez en su teléfono; desde ahí la app abre directo en la pantalla de retiro. Elige su equipo (queda guardado) y, si quiere, su nombre para que el jefe vea quién retiró. Toca los premios y registra.
+- **El equipo (promotores, salón, ventas): sin usuario ni PIN.** Abre el **link de retiros** una vez en su teléfono; desde ahí la app abre directo en la pantalla de retiro. Elige su equipo y su nombre en **"¿Quién eres?"** (desplegable en orden alfabético, obligatorio). El teléfono recuerda ambos, así que las siguientes veces solo toca los premios y registra.
 - **Jefes y administradores:** en esa misma pantalla, arriba a la derecha, tocan **"¿Eres jefe?"**, eligen su nombre de la lista y ponen su **PIN**. La sesión queda abierta hasta que tocan "Cerrar sesión"; al cerrarla, el teléfono vuelve a la pantalla de retiro.
 - Desde una computadora sin link: aparece el ingreso con usuario y PIN.
 
@@ -97,7 +100,7 @@ Si el administrador se creó antes con una contraseña común, puede entrar con 
 ### Quién puede hacer qué
 
 - **Equipo (con el link):** solo **retirar premios** para su equipo y deshacer su último retiro.
-- **Jefe de sector** (líder de promotores, de salón, de ventas): **solo consulta**. En **Consumo** ve qué se retiró y quién, con la fecha y la hora exactas, agrupado por día (hoy, semana, mes, mes anterior), y puede exportarlo a Excel o PDF. No puede cargar nada; lo bloquea la base de datos. Un **jefe general** se crea igual pero **sin marcar sectores**, y ve todos.
+- **Jefe de sector** (líder de promotores, de salón, de ventas): carga a las personas de su equipo en **Mi equipo** (agregar, corregir nombre, dar de baja) y consulta los retiros, pero **no retira premios**. En **Consumo** ve qué se retiró y quién, con la fecha y la hora exactas, agrupado por día (hoy, semana, mes, mes anterior), y puede exportarlo a Excel o PDF. No puede cargar nada; lo bloquea la base de datos. Un **jefe general** se crea igual pero **sin marcar sectores**, y ve todos.
 - **Administrador:** todo (dashboard, stock, ingresos, ajustes, inventario, historial, reportes, usuarios, auditoría, link de retiros).
 
 ### Retiro rápido (reemplazo del grupo de WhatsApp)
