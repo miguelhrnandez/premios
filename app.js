@@ -70,7 +70,7 @@ const NAV = [
   { id: 'historial',     t: 'Historial',            i: 'history',          roles: ['admin'] },
   { id: 'inventario',    t: 'Inventario',           i: 'clipboard-check',  roles: ['admin'] },
   { id: 'reportes',      t: 'Reportes',             i: 'chart-column',     roles: ['admin'] },
-  { id: 'pronostico',    t: 'Pronóstico y compras', i: 'sparkles',         roles: ['admin'] },
+  { id: 'pronostico',    t: 'Pronóstico y pedidos', i: 'sparkles',         roles: ['admin'] },
   { id: 'usuarios',      t: 'Usuarios',             i: 'users',            roles: ['admin'] },
   { id: 'auditoria',     t: 'Auditoría',            i: 'shield-check',     roles: ['admin'] },
   { sep: 'Cuenta' },
@@ -101,7 +101,7 @@ const rolActual = () => (S.perfil ? S.perfil.rol : '');
 const isAdmin = () => rolActual() === 'admin';
 const isJefe = () => rolActual() === 'supervisor';
 const puedeRetirar = () => ['admin', 'usuario', 'supervisor'].includes(rolActual());
-const PRON_DEF = { per: 7, entrega: 3, margen: 'alto', gr: 'dia', soloComprar: false, todas: false };
+const PRON_DEF = { per: 7, entrega: 0, margen: 'alto', gr: 'dia', soloComprar: true, todas: false, ent: 0 };
 function defaultsF() {
   const hoy = ymd(new Date());
   return {
@@ -1172,7 +1172,7 @@ function modeloPronostico({ hasta = inicioDia(new Date()), movs = S.movs, especi
   const medias = sW.map((s, i) => nW[i] ? s / nW[i] : null);
   const conDatos = medias.filter(v => v != null);
   const prom = conDatos.length ? sum(conDatos) / conDatos.length : 0;
-  const K = 2;
+  const K = 1; // con pocas semanas de datos el patrón se acerca a "todos los días iguales"
   let idx = medias.map((v, i) => (v == null || prom <= 0) ? 1 : (nW[i] * (v / prom) + K) / (nW[i] + K));
   const pIdx = sum(idx) / 7; idx = idx.map(v => v / pIdx);
 
@@ -1387,11 +1387,94 @@ function planCompras({ per = 7, entrega = 3, margen = 'alto' } = {}) {
   return { M, P, hoy, hoyReg, filas, rit: ritmoHoy(M, hoyReg), z };
 }
 
+/* ---------------- Entregas diarias del proveedor ----------------
+   El proveedor entrega ciertos días (por defecto lunes a sábado) y el pedido llega en el día.
+   Cada pedido tiene que alcanzar desde que llega hasta que llega la entrega siguiente
+   (el del sábado cubre el resto del sábado, el domingo y el lunes hasta que llegue la entrega). */
+function cfgEntrega() {
+  const c = S.config || {};
+  const dias = String(c.entrega_dias || '1,2,3,4,5,6').split(',').map(Number).filter(n => n >= 0 && n <= 6);
+  const hora = Math.min(21, Math.max(7, parseInt(c.entrega_hora || '13', 10) || 13));
+  return { dias: dias.length ? dias : [1, 2, 3, 4, 5, 6], hora, feriados: c.entrega_feriados === 'si' };
+}
+const hayEntrega = (M, d, cfg) => {
+  if (!cfg.dias.includes(d.getDay())) return false;
+  const e = M.esp.get(ymd(d));
+  if (esCerrado(e)) return false;
+  if (!cfg.feriados && esFeriado(e)) return false;
+  return true;
+};
+// Parte del consumo diario que ya pasó a la hora h (con decimales). Sin historial horario: lineal de 10 a 22.
+function fracHora(M, h) {
+  if (h <= 0) return 0; if (h >= 24) return 1;
+  if (M.curva) { const i = Math.floor(h), f = h - i, a = i > 0 ? M.curva[i - 1] : 0; return a + (M.curva[i] - a) * f; }
+  return Math.min(1, Math.max(0, (h - 10) / 12));
+}
+
+function planEntregas({ margen = 'alto', ahora = new Date() } = {}) {
+  const z = (MARGENES[margen] || MARGENES.alto).z;
+  const hoy = inicioDia(ahora), hNow = ahora.getHours() + ahora.getMinutes() / 60;
+  const M = modeloPronostico({ hasta: hoy });
+  const cfg = cfgEntrega(), hoyReg = retiradoHoy(), rit = ritmoHoy(M, hoyReg, ahora);
+  // Próximas entregas: hoy solo si todavía se puede pedir (antes de las 21)
+  const ent = [];
+  for (let i = 0; i < 28 && ent.length < 8; i++) {
+    const d = addDias(hoy, i);
+    if (!hayEntrega(M, d, cfg)) continue;
+    if (i === 0 && hNow >= 21) continue;
+    ent.push({ d, h: i === 0 ? Math.max(cfg.hora, hNow) : cfg.hora, hoy: i === 0 });
+  }
+  // Consumo esperado (y su varianza diaria) de una clave entre dos momentos
+  const consumo = (t, a, ah, b, bh) => {
+    let e = 0, v = 0;
+    for (let d = inicioDia(a); d <= inicioDia(b); d = addDias(d, 1)) {
+      const desde = ymd(d) === ymd(a) ? ah : 0, hasta = ymd(d) === ymd(b) ? bh : 24;
+      let fr = fracHora(M, hasta) - fracHora(M, Math.max(desde, 0));
+      if (fr <= 0) continue;
+      const mu = multFecha(M, d) * (ymd(d) === ymd(hoy) ? rit.factor : 1), k = 1 + t.m;
+      e += t.r * k * mu * fr; v += t.v * k * k * mu * mu * fr;
+    }
+    return { e, v };
+  };
+  const nEnt = Math.max(0, ent.length - 1); // la última solo marca el final de la ventana anterior
+  const filas = unidadesStock().map(u => {
+    const key = u.g ? 'g' + u.g.id : 'p' + u.p.id;
+    const g = u.g || null, ms = g ? miembrosDe(g) : [u.p];
+    const pref = g ? (ms.find(x => x.id === g.preferido_id) || null) : u.p;
+    const pk = Number((pref || u.p).unidades_por_paquete) || 0;
+    const base = { key, p: u.p, g, ms, pref, nombre: u.nombre, stock: u.stock, minimo: u.minimo, pk };
+    const t = M.tasas.get(key);
+    if (!t || (t.reg === 0 && t.fal === 0) || !nEnt) return { ...base, sinDatos: !t || (t.reg === 0 && t.fal === 0), pedidos: new Array(nEnt).fill(0), paquetes: new Array(nEnt).fill(0), llegadas: [], ventanas: [], riesgo: u.stock <= 0 && !!t };
+    // Hasta que llega la primera entrega, se consume del stock actual
+    const antes = consumo(t, ahora, hNow, ent[0].d, ent[0].h);
+    const sdAntes = Math.sqrt(antes.v + antes.e * antes.e * (t.relVar + (M.trRelVar || 0)));
+    let st = u.stock - antes.e;
+    const riesgo = u.stock <= 0 || (u.stock - antes.e - z * sdAntes) < 0;
+    const pedidos = [], paquetes = [], llegadas = [], ventanas = [];
+    for (let k = 0; k < nEnt; k++) {
+      const w = consumo(t, ent[k].d, ent[k].h, ent[k + 1].d, ent[k + 1].h);
+      // en la primera ventana también es incierto cuánto se retira antes de que llegue la entrega
+      const vv = k === 0 ? w.v + antes.v : w.v, ee = k === 0 ? w.e + antes.e : w.e;
+      const sd = Math.sqrt(vv + ee * ee * (t.relVar + (M.trRelVar || 0)));
+      llegadas.push(st); ventanas.push({ e: w.e, sd });
+      let ped = w.e > 0.05 ? Math.max(0, Math.ceil(w.e + z * sd + (u.minimo || 0) - Math.max(st, 0))) : 0;
+      let paq = 0;
+      if (pk > 1 && ped > 0) { paq = Math.ceil(ped / pk); ped = paq * pk; }
+      pedidos.push(ped); paquetes.push(paq);
+      st = Math.max(st, 0) + ped - w.e;
+    }
+    return { ...base, t, sinDatos: false, pedidos, paquetes, llegadas, ventanas, riesgo, antes: antes.e };
+  });
+  const orden = r => r.riesgo ? 0 : r.pedidos[0] > 0 ? 1 : r.sinDatos ? 3 : 2;
+  filas.sort((a, b) => orden(a) - orden(b) || (b.pedidos[0] || 0) - (a.pedidos[0] || 0) || a.nombre.localeCompare(b.nombre, 'es'));
+  return { M, cfg, ent, nEnt, filas, rit, z, hoy };
+}
+
 /* =============================================================
    VISTA: PRONÓSTICO Y COMPRAS
    ============================================================= */
-const prF = () => { const f = S.f.pron; try { const g = JSON.parse(localStorage.getItem('sp_pron') || '{}'); ['per', 'entrega', 'margen'].forEach(k => { if (g[k] != null && f._init !== true) f[k] = g[k]; }); } catch (e) { /* ignorar */ } f._init = true; return f; };
-const prGuardar = f => { try { localStorage.setItem('sp_pron', JSON.stringify({ per: f.per, entrega: f.entrega, margen: f.margen })); } catch (e) { /* ignorar */ } };
+const prF = () => { const f = S.f.pron; try { const g = JSON.parse(localStorage.getItem('sp_pron') || '{}'); ['margen'].forEach(k => { if (g[k] && MARGENES[g[k]] && f._init !== true) f[k] = g[k]; }); } catch (e) { /* ignorar */ } f._init = true; return f; };
+const prGuardar = f => { try { localStorage.setItem('sp_pron', JSON.stringify({ margen: f.margen })); } catch (e) { /* ignorar */ } };
 const fU = n => fNum(Math.round(n));
 const pct = r => `${r >= 0 ? '+' : '−'}${Math.round(Math.abs(r) * 100)}%`;
 const fechaCorta = d => { const x = new Date(d); return `${DOW_SG[x.getDay()]} ${x.getDate()}/${x.getMonth() + 1}`; };
@@ -1413,23 +1496,40 @@ const ESTADO_PR = {
 };
 
 VIEWS.pronostico = {
-  title: () => 'Pronóstico y compras',
+  title: () => 'Pronóstico y pedidos',
   mount(el) {
     const f = prF();
+    const cfg = cfgEntrega();
     el.innerHTML = `
-      <div class="page-head"><p>Aprende de cada retiro: qué días se retira más, hacia dónde va el consumo y cuánto vas a necesitar. Se recalcula solo con cada movimiento.</p></div>
+      <div class="page-head"><p>Aprende de cada retiro y calcula cuánto pedirle al proveedor en cada entrega para no quedarte sin nada, sin llenar el depósito. Se recalcula solo con cada movimiento.</p></div>
       <div class="panel"><div class="panel-b pron-ctl">
-        <div class="pc-g"><span class="lbl">Período a cubrir</span>
-          <div class="chips" id="pr-per">${[7, 14, 30].map(n => `<button class="chip" data-per="${n}">${n} días</button>`).join('')}</div></div>
-        <div class="pc-g"><span class="lbl" id="pr-ent-l">La mercadería tarda en llegar</span>
-          <div class="stepper sm" role="group" aria-labelledby="pr-ent-l"><button type="button" data-ent="-1" aria-label="Un día menos">${ic('minus', 's')}</button><span class="stv"><b id="pr-ent">${f.entrega}</b> días</span><button type="button" data-ent="1" aria-label="Un día más">${ic('plus', 's')}</button></div></div>
+        <div class="pc-g"><span class="lbl">El proveedor entrega</span>
+          <div class="chips dias" id="pr-dias">${[1, 2, 3, 4, 5, 6, 0].map(d => `<button class="chip" data-dia="${d}" aria-pressed="${cfg.dias.includes(d)}">${DOW_C[d]}</button>`).join('')}</div>
+          <label class="check small"><input type="checkbox" id="pr-fer" ${cfg.feriados ? 'checked' : ''}> También entrega en feriados</label></div>
+        <div class="pc-g"><label class="lbl" for="pr-hora">El pedido suele llegar a las</label>
+          <select class="in" id="pr-hora" style="max-width:140px">${Array.from({ length: 13 }, (_, i) => i + 8).map(h => `<option value="${h}" ${h === cfg.hora ? 'selected' : ''}>${h}:00</option>`).join('')}</select></div>
         <div class="pc-g"><span class="lbl">Margen de seguridad</span>
           <div class="chips" id="pr-mg">${Object.entries(MARGENES).map(([k, m]) => `<button class="chip" data-mg="${k}" title="${m.s}">${m.t}</button>`).join('')}</div>
           <span class="hint" id="pr-mg-s"></span></div>
       </div></div>
       <div id="pr-aviso"></div>
       <div class="kpis k4 mt" id="pr-kpis"></div>
-      <div class="panel">
+      <div class="panel" id="pr-ped">
+        <div class="panel-h"><h2 id="pr-ped-t">Pedido al proveedor</h2><span class="sub" id="pr-ped-s"></span><span class="sp"></span>
+          <label class="check"><input type="checkbox" id="pr-solo" ${f.soloComprar ? 'checked' : ''}> Solo lo que hay que pedir</label></div>
+        <div class="panel-b ped-bar">
+          <div class="chips" id="pr-ent"></div><span class="sp"></span>
+          <div class="row" style="gap:6px"><button class="btn sm" id="pr-copy">${ic('copy', 's')}Copiar pedido</button><button class="btn sm wa" id="pr-wa">${ic('message-circle', 's')}Enviar por WhatsApp</button>${expBtns('pr')}</div>
+        </div>
+        <div class="tbl-wrap"><table class="rt resp pr-t">
+          <thead><tr><th>Producto</th><th class="n">Stock ahora</th><th class="n">Cuando llegue</th><th class="n">Se usa hasta la próxima</th><th class="n">Pedir</th><th>Estado</th></tr></thead>
+          <tbody id="pr-tb"></tbody></table></div>
+      </div>
+      <div class="panel mt">
+        <div class="panel-h"><h2>Plan de pedidos de la semana</h2><span class="sub">Cada pedido cuenta con lo que va a sobrar del anterior. Es una estimación: se recalcula cada día con lo que realmente se retiró.</span></div>
+        <div class="tbl-wrap plan-wrap"><table class="rt plan-t" id="pr-plan"></table></div>
+      </div>
+      <div class="panel mt">
         <div class="panel-h"><h2>Consumo real y pronóstico</h2><span class="sub" id="pr-ch-sub"></span><span class="sp"></span>
           <div class="chips" id="pr-gr"><button class="chip" data-gr="dia">Por día</button><button class="chip" data-gr="semana">Por semana</button></div></div>
         <div class="chart-box"><canvas id="pr-chart" aria-label="Gráfico de consumo real y pronóstico"></canvas></div>
@@ -1439,19 +1539,12 @@ VIEWS.pronostico = {
         <div class="panel"><div class="panel-h"><h2>Lo que detectó</h2></div><ul class="ins" id="pr-ins"></ul></div>
       </div>
       <div class="panel mt">
-        <div class="panel-h"><h2>Qué comprar</h2><span class="sub" id="pr-t-sub"></span><span class="sp"></span>
-          <label class="check"><input type="checkbox" id="pr-solo" ${f.soloComprar ? 'checked' : ''}> Solo lo que hay que comprar</label>${expBtns('pr')}</div>
-        <div class="tbl-wrap" style="margin-top:8px"><table class="rt resp pr-t">
-          <thead><tr><th>Premio</th><th class="n">Stock</th><th class="n">Por día</th><th class="n">Necesitas</th><th>Alcanza hasta</th><th class="n">Comprar</th><th>Estado</th></tr></thead>
-          <tbody id="pr-tb"></tbody></table></div>
-      </div>
-      <div class="panel mt">
         <div class="panel-h"><h2>Fechas especiales y temporadas</h2><span class="sub">Feriados, cierres, eventos, vacaciones y vuelta a clases</span><span class="sp"></span>
           <button class="btn sm pri" id="pr-addf">${ic('calendar-plus', 's')}Agregar fecha</button></div>
         <ul class="list fe-list" id="pr-fechas" style="margin-top:8px"></ul>
         <div class="panel-b" style="padding-top:6px"><button class="btn sm ghost" id="pr-todas"></button></div>
       </div>
-      <p class="muted pr-pie">Cómo calcula: toma lo retirado en las últimas 12 semanas (lo reciente pesa más), el efecto de cada día de la semana, la tendencia, los faltantes de inventario, los feriados y las temporadas (vacaciones, vuelta a clases, fiestas), que aprende comparando con las semanas anteriores y con el año pasado. Los días cerrados no se cuentan. El pedido sugerido cubre el período con el margen elegido y deja al menos el stock mínimo de cada premio.</p>`;
+      <p class="muted pr-pie">Cómo calcula: toma lo retirado en las últimas 12 semanas (lo reciente pesa más), el efecto de cada día de la semana y de cada hora del día, la tendencia, los faltantes de inventario, los feriados y las temporadas. Los días en que un premio (o todas las marcas de un grupo) estuvo sin stock no se cuentan, porque ese día no se pudo retirar. Cada pedido alcanza desde que llega hasta que llega la entrega siguiente, con el margen elegido, y deja al menos el stock mínimo.</p>`;
 
     const c = chartColors();
     const alfa = (hex, a) => { const h = hex.replace('#', ''); const n = parseInt(h.length === 3 ? h.split('').map(x => x + x).join('') : h, 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
@@ -1474,53 +1567,92 @@ VIEWS.pronostico = {
     });
 
     const re = () => { prGuardar(f); this.paint(); icons(); };
-    $('#pr-per').onclick = e => { const b = e.target.closest('[data-per]'); if (!b) return; f.per = +b.dataset.per; re(); };
+    const guardarCfg = async (clave, valor) => {
+      S.config[clave] = valor; this.paint(); icons();
+      try { await API.guardarConfig(clave, valor); toast('Guardado.', 'ok', 1500); }
+      catch (e) { toast('No se pudo guardar: ' + esc(errMsg(e)), 'bad'); }
+    };
+    $('#pr-dias').onclick = e => {
+      const b = e.target.closest('[data-dia]'); if (!b) return;
+      const d = +b.dataset.dia, act = cfgEntrega().dias;
+      const nuevo = act.includes(d) ? act.filter(x => x !== d) : act.concat(d);
+      if (!nuevo.length) return toast('Tiene que haber al menos un día de entrega.', 'warn');
+      b.setAttribute('aria-pressed', String(!act.includes(d))); f.ent = 0;
+      guardarCfg('entrega_dias', nuevo.sort((x, y) => x - y).join(','));
+    };
+    $('#pr-fer').onchange = e => guardarCfg('entrega_feriados', e.target.checked ? 'si' : 'no');
+    $('#pr-hora').onchange = e => guardarCfg('entrega_hora', e.target.value);
     $('#pr-mg').onclick = e => { const b = e.target.closest('[data-mg]'); if (!b) return; f.margen = b.dataset.mg; re(); };
     $('#pr-gr').onclick = e => { const b = e.target.closest('[data-gr]'); if (!b) return; f.gr = b.dataset.gr; re(); };
-    el.querySelector('.stepper').onclick = e => { const b = e.target.closest('[data-ent]'); if (!b) return; f.entrega = Math.min(30, Math.max(0, f.entrega + +b.dataset.ent)); $('#pr-ent').textContent = f.entrega; re(); };
+    $('#pr-ent').onclick = e => { const b = e.target.closest('[data-k]'); if (!b) return; f.ent = +b.dataset.k; re(); };
     $('#pr-solo').onchange = e => { f.soloComprar = e.target.checked; re(); };
     $('#pr-todas').onclick = () => { f.todas = !f.todas; this.paintFechas(); icons(); };
     $('#pr-addf').onclick = () => modalFecha();
     $('#pr-fechas').onclick = e => { const b = e.target.closest('[data-fe]'); if (b) modalFecha((S.especiales || []).find(x => x.id === +b.dataset.fe)); };
     $('#pr-tb').onclick = e => { const r = e.target.closest('[data-pp]'); if (r) modalPronPremio(r.dataset.pp); };
-    bindExp(el, 'pr', () => ({
-      base: 'lista_de_compras',
-      title: `Qué comprar: próximos ${f.per} días (margen ${MARGENES[f.margen].t.toLowerCase()}, la mercadería tarda ${f.entrega} días)`,
-      cols: [
-        { h: 'Premio o grupo', v: r => r.nombre },
-        { h: 'Marcas', v: r => r.g ? r.ms.map(p => `${p.nombre} (${p.stock_actual})`).join(', ') : '' },
-        { h: 'Stock actual', v: r => r.stock },
-        { h: 'Consumo por día', v: r => r.sinDatos ? 0 : Math.round(r.porDia * 10) / 10 },
-        { h: `Necesario ${f.per} días`, v: r => Math.round(r.necesita) },
-        { h: 'Rango probable', v: r => r.sinDatos ? '' : `${Math.round(r.lo)} a ${Math.round(r.hi)}` },
-        { h: 'Alcanza hasta', v: r => r.sinDatos ? 'Sin retiros' : !r.agota ? 'Más de 4 meses' : r.agota <= this.plan.hoy ? 'Agotado' : fFecha(r.agota) },
-        { h: 'Comprar (unidades)', v: r => r.pedido },
-        { h: 'Marca a comprar', v: r => r.pedido > 0 ? (r.pref ? r.pref.nombre : 'Cualquiera') : '' },
-        { h: 'Paquetes', v: r => r.paquetes ? `${r.paquetes} x ${r.pk}` : '' },
-        { h: 'Estado', v: r => ESTADO_PR[r.estado].t }
-      ],
-      rows: this.filasVisibles()
-    }));
+    $('#pr-plan').onclick = e => { const r = e.target.closest('[data-pp]'); if (r) modalPronPremio(r.dataset.pp); };
+    $('#pr-copy').onclick = async () => {
+      const t = this.textoPedido(); if (!t) return toast('No hay nada para pedir en esta entrega.', 'warn');
+      try { await navigator.clipboard.writeText(t); toast('Pedido copiado. Pégalo en el chat con el proveedor.', 'ok', 2500); }
+      catch (e) { modal({ title: 'Copiar pedido', body: `<textarea class="in" rows="10" style="width:100%" readonly>${esc(t)}</textarea>`, foot: '<button class="btn pri" data-close>Listo</button>' }); }
+    };
+    $('#pr-wa').onclick = () => {
+      const t = this.textoPedido(); if (!t) return toast('No hay nada para pedir en esta entrega.', 'warn');
+      window.open('https://wa.me/?text=' + encodeURIComponent(t), '_blank', 'noopener');
+    };
+    bindExp(el, 'pr', () => {
+      const pe = this.pe, k = Math.min(S.f.pron.ent, Math.max(pe.nEnt - 1, 0));
+      return {
+        base: 'pedido_proveedor',
+        title: `Pedido al proveedor: ${pe.ent[k] ? fechaCorta(pe.ent[k].d) : ''} (margen ${MARGENES[S.f.pron.margen].t.toLowerCase()})`,
+        cols: [
+          { h: 'Producto', v: r => r.g ? (r.pref ? r.pref.nombre : `${r.nombre} (cualquier marca)`) : r.nombre },
+          { h: 'Grupo', v: r => r.g ? r.nombre : '' },
+          { h: 'Stock ahora', v: r => r.stock },
+          { h: 'Stock cuando llegue (estimado)', v: r => r.llegadas[k] != null ? Math.max(0, Math.round(r.llegadas[k])) : '' },
+          { h: 'Se usa hasta la próxima entrega', v: r => r.ventanas[k] ? Math.round(r.ventanas[k].e) : '' },
+          { h: 'Pedir', v: r => r.pedidos[k] || 0 },
+          { h: 'Paquetes', v: r => r.paquetes[k] ? `${r.paquetes[k]} x ${r.pk}` : '' }
+        ],
+        rows: this.filasPedido(k)
+      };
+    });
     this.paint();
-    if (S.especialesErr) $('#pr-aviso').innerHTML = `<div class="callout warn mt">${ic('database', 's')}<span>Para guardar fechas especiales y cajas por premio falta ejecutar en Supabase el archivo <b>migracion_08_pronostico.sql</b>. El pronóstico funciona igual.</span></div>`;
+    const avisos = [];
+    if (S.especialesErr) avisos.push('<b>migracion_08_pronostico.sql</b> (fechas especiales y cajas por premio)');
+    if (S.gruposErr) avisos.push('<b>migracion_09_grupos.sql</b> (grupos de marcas)');
+    if (avisos.length) $('#pr-aviso').insertAdjacentHTML('beforeend', `<div class="callout warn mt">${ic('database', 's')}<span>Falta ejecutar en Supabase ${avisos.join(' y ')}. El pronóstico funciona igual.</span></div>`);
   },
 
-  filasVisibles() { const f = S.f.pron; return (this.plan ? this.plan.filas : []).filter(r => !f.soloComprar || r.pedido > 0 || r.estado === 'urgente'); },
+  filasPedido(k) { const f = S.f.pron; return (this.pe ? this.pe.filas : []).filter(r => !f.soloComprar || (r.pedidos[k] || 0) > 0 || (k === 0 && r.riesgo)); },
+
+  textoPedido() {
+    const pe = this.pe; if (!pe || !pe.nEnt) return '';
+    const k = Math.min(S.f.pron.ent, pe.nEnt - 1), e = pe.ent[k];
+    const filas = pe.filas.filter(r => (r.pedidos[k] || 0) > 0);
+    if (!filas.length) return '';
+    const dia = e.hoy ? `hoy ${fechaCorta(e.d)}` : fechaCorta(e.d);
+    return [`Pedido Más Dueños ${S.config.nombre_sucursal || ''} – ${dia}`.replace(/\s+–/, ' –'), '',
+      ...filas.map(r => `• ${r.g ? (r.pref ? r.pref.nombre : `${r.nombre} (cualquier marca)`) : r.nombre}: ${fNum(r.pedidos[k])}${r.paquetes[k] ? ` (${r.paquetes[k]} ${r.paquetes[k] > 1 ? 'paquetes' : 'paquete'} de ${r.pk})` : ''}`),
+      '', 'Gracias.'].join('\n');
+  },
 
   paint() {
     if (!$('#pr-tb')) return;
-    const f = S.f.pron;
-    $$('#pr-per .chip').forEach(b => b.classList.toggle('on', +b.dataset.per === f.per));
+    const f = S.f.pron, cfg = cfgEntrega();
     $$('#pr-mg .chip').forEach(b => b.classList.toggle('on', b.dataset.mg === f.margen));
     $$('#pr-gr .chip').forEach(b => b.classList.toggle('on', b.dataset.gr === f.gr));
+    $$('#pr-dias .chip').forEach(b => b.classList.toggle('on', cfg.dias.includes(+b.dataset.dia)));
     $('#pr-mg-s').textContent = MARGENES[f.margen].s;
-    const plan = this.plan = planCompras({ per: f.per, entrega: f.entrega, margen: f.margen });
+    f.per = 7;
+    const plan = this.plan = planCompras({ per: 7, entrega: 0, margen: f.margen });
+    const pe = this.pe = planEntregas({ margen: f.margen });
     const { M, hoy, hoyReg, rit } = plan;
+    if (f.ent >= pe.nEnt) f.ent = 0;
 
     if (M.vacio) {
-      $('#pr-kpis').innerHTML = '';
       $('#pr-aviso').innerHTML = `<div class="callout info mt">${ic('sparkles', 's')}<span>Todavía no hay retiros registrados. Con los primeros días de uso la app empieza a detectar el consumo, y a partir de las 2 semanas ya reconoce los días más movidos.</span></div>`;
-    } else if (!S.especialesErr) $('#pr-aviso').innerHTML = '';
+    } else if ($('#pr-aviso .callout.info')) $('#pr-aviso .callout.info').remove();
 
     // ---- KPIs
     const ya = sum([...hoyReg.values()]);
@@ -1530,28 +1662,79 @@ VIEWS.pronostico = {
     const regEn = (a, b) => sum(salidasVig().filter(m => { const d = new Date(m.creado_en); return d >= a && d < b; }), qtyEf);
     const ahora = new Date();
     const semAct = regEn(lunesH, ahora), semAnt = regEn(addDias(lunesH, -7), new Date(ahora - 7 * DIA_MS));
-    const conDatos = plan.filas.filter(r => !r.sinDatos);
-    const nec = sum(conDatos, r => r.necesita), lo = sum(conDatos, r => r.lo), hi = sum(conDatos, r => r.hi);
-    const nComprar = plan.filas.filter(r => r.pedido > 0).length, nUrg = plan.filas.filter(r => r.estado === 'urgente').length;
     const bt = backtest();
-    const conf = M.vacio || M.n < 14 ? { t: 'Baja', c: 'warn', s: `Lleva ${M.n || 0} día(s) de datos; mejora a partir de las 2 semanas` }
-      : (M.n < 42 || (bt && bt.semana > 0.25)) ? { t: 'Media', c: 'low', s: bt ? `La semana pasada se desvió ${Math.round(bt.semana * 100)}%` : `${M.n} días de datos` }
-      : { t: 'Alta', c: 'ok', s: bt ? `La semana pasada se desvió ${Math.round(bt.semana * 100)}%` : `${M.n} días de datos` };
+    const conf = M.vacio || M.n < 14 ? { t: 'Baja', s: `Lleva ${M.n || 0} día(s) de datos; mejora a partir de las 2 semanas` }
+      : (M.n < 42 || (bt && bt.semana > 0.25)) ? { t: 'Media', s: bt ? `La semana pasada se desvió ${Math.round(bt.semana * 100)}%` : `${M.n} días de datos` }
+      : { t: 'Alta', s: bt ? `La semana pasada se desvió ${Math.round(bt.semana * 100)}%` : `${M.n} días de datos` };
     let ritTxt = '';
     if (hoyF.f === 0) ritTxt = 'Hoy está cerrado';
     else if (rit.ratio != null) ritTxt = Math.abs(rit.ratio - 1) < 0.1 ? 'Viene al ritmo normal' : `Viene un ${Math.round(Math.abs(rit.ratio - 1) * 100)}% ${rit.ratio > 1 ? 'más movido' : 'más tranquilo'} que lo normal`;
     else ritTxt = `Lo normal para un ${DOW_SG[hoy.getDay()]}: ~${fU(espHoy)}`;
+    const e0 = pe.ent[0], tot0 = sum(pe.filas, r => r.pedidos[0] || 0), n0 = pe.filas.filter(r => (r.pedidos[0] || 0) > 0).length;
+    const nRiesgo = pe.filas.filter(r => r.riesgo).length;
     $('#pr-kpis').innerHTML = M.vacio ? '' : `
       <div class="kpi ${rit.ratio != null && rit.ratio > 1.15 ? 'warn' : ''}"><span class="kpi-l">${ic('sun', 's')}Hoy</span><span class="kpi-v">${fNum(ya)}</span><span class="kpi-s">${ritTxt}</span></div>
       <div class="kpi"><span class="kpi-l">${ic('calendar-range', 's')}Esta semana</span><span class="kpi-v">${fNum(semAct)}</span><span class="kpi-s">${semAnt > 0 ? `${pct(semAct / semAnt - 1)} que la semana pasada a esta altura` : `De lunes a ${DOW_SG[hoy.getDay()]}`}</span></div>
-      <div class="kpi"><span class="kpi-l">${ic('package-search', 's')}Necesitas en ${f.per} días</span><span class="kpi-v">~${fU(nec)}</span><span class="kpi-s">Entre ${fU(lo)} y ${fU(hi)} unidades${nComprar ? ` · ${nComprar} premio(s) para comprar` : ''}</span></div>
-      <div class="kpi ${nUrg ? 'bad' : ''}"><span class="kpi-l">${ic('gauge', 's')}Confianza: ${conf.t}</span><span class="kpi-v">${nUrg ? `${nUrg} urgente${nUrg > 1 ? 's' : ''}` : 'Al día'}</span><span class="kpi-s">${conf.s}</span></div>`;
+      <div class="kpi"><span class="kpi-l">${ic('truck', 's')}${e0 ? (e0.hoy ? 'Pedido de hoy' : `Pedido del ${DOW_SG[e0.d.getDay()]}`) : 'Pedido'}</span><span class="kpi-v">${fNum(tot0)}</span><span class="kpi-s">${n0 ? `${n0} producto(s)` : 'Nada para pedir'}${pe.ent[1] ? ` · alcanza hasta el ${DOW_SG[pe.ent[1].d.getDay()]} ${pe.ent[1].h}:00` : ''}</span></div>
+      <div class="kpi ${nRiesgo ? 'bad' : ''}"><span class="kpi-l">${ic('gauge', 's')}Confianza: ${conf.t}</span><span class="kpi-v">${nRiesgo ? `${nRiesgo} en riesgo` : 'Al día'}</span><span class="kpi-s">${nRiesgo ? 'Pueden faltar antes de que llegue el pedido' : conf.s}</span></div>`;
 
+    this.paintPedido();
+    this.paintPlan();
     this.paintChart(plan);
     this.paintDow(M);
     this.paintIns(plan, bt, semAct, semAnt);
-    this.paintTabla(plan);
     this.paintFechas();
+  },
+
+  paintPedido() {
+    const pe = this.pe, f = S.f.pron;
+    const labelEnt = (e, i) => e.hoy ? 'Hoy' : i === 1 && Math.round((e.d - pe.hoy) / DIA_MS) === 1 ? 'Mañana' : fDiaC(e.d);
+    $('#pr-ent').innerHTML = pe.ent.slice(0, pe.nEnt).map((e, i) => `<button class="chip ${i === f.ent ? 'on' : ''}" data-k="${i}">${labelEnt(e, i)}</button>`).join('');
+    if (!pe.nEnt) {
+      $('#pr-ped-t').textContent = 'Pedido al proveedor'; $('#pr-ped-s').textContent = '';
+      $('#pr-tb').innerHTML = emptyRow(6, 'No hay días de entrega configurados', 'Elige arriba qué días entrega el proveedor.', 'truck');
+      return;
+    }
+    const k = f.ent, e = pe.ent[k], nx = pe.ent[k + 1];
+    const saltea = Math.round((inicioDia(nx.d) - inicioDia(e.d)) / DIA_MS) > 1;
+    $('#pr-ped-t').textContent = e.hoy ? `Pedido de hoy, ${fechaCorta(e.d)}` : `Pedido del ${fechaCorta(e.d)}`;
+    $('#pr-ped-s').textContent = `Alcanza hasta que llegue el del ${fechaCorta(nx.d)} (~${nx.h}:00)${saltea ? `, incluye ${Math.round((inicioDia(nx.d) - inicioDia(e.d)) / DIA_MS) - 1 === 1 ? DOW_SG[addDias(e.d, 1).getDay()] : 'los días sin entrega'}` : ''}${k > 0 ? ' · estimado' : ''}`;
+    const filas = this.filasPedido(k);
+    const pDia = r => { if (!r.ventanas[k]) return '—'; const x = r.ventanas[k].e; return x < 10 ? x.toFixed(1).replace('.', ',') : fU(x); };
+    const est = r => {
+      if (r.sinDatos) return '<span class="badge mute">Sin retiros</span>';
+      if (k === 0 && r.riesgo) return `<span class="badge out">${ic('siren', 's')}${r.stock <= 0 ? 'Sin stock: pide ya' : `Puede faltar antes de las ${Math.floor(e.h)}:00`}</span>`;
+      return (r.pedidos[k] || 0) > 0 ? `<span class="badge low">${ic('truck', 's')}Pedir</span>` : `<span class="badge ok">${ic('circle-check', 's')}Alcanza</span>`;
+    };
+    const nombre = r => r.g
+      ? `<div class="pname">${esc(r.nombre)} <span class="gtag">${ic('layers', 's')}${r.ms.length} marcas</span></div><div class="pcode">${(r.pedidos[k] || 0) > 0 ? (r.pref ? `Pedir: <b>${esc(r.pref.nombre)}</b>` : 'Cualquier marca') : r.ms.map(p => `${esc(p.nombre)} ${fNum(p.stock_actual)}`).join(' · ')}</div>`
+      : `<div class="pname">${esc(r.nombre)}</div><div class="pcode">${esc(catName(r.p.categoria_id))}</div>`;
+    const ped = r => (r.pedidos[k] || 0) > 0 ? `<b class="big-n">${fNum(r.pedidos[k])}</b>${r.paquetes[k] ? `<div class="t2">${r.paquetes[k]} × ${r.pk}</div>` : ''}` : '<span class="muted">—</span>';
+    const lleg = r => r.llegadas[k] != null ? fU(Math.max(0, r.llegadas[k])) : '—';
+    $('#pr-tb').innerHTML = filas.length ? filas.map(r => `
+      <tr data-pp="${r.key}" class="clk" title="Ver el detalle de ${esc(r.nombre)}">
+        <td><div class="pcell">${thumb(r.pref || r.p)}<div style="min-width:0">${nombre(r)}</div></div></td>
+        <td class="n num">${fNum(r.stock)}</td>
+        <td class="n num">${lleg(r)}</td>
+        <td class="n num">${r.sinDatos ? '—' : `~${pDia(r)}`}</td>
+        <td class="n num">${ped(r)}</td>
+        <td>${est(r)}</td>
+        <td class="mob"><div class="mrow">${thumb(r.pref || r.p)}<div class="grow"><div class="t1">${esc(r.g && (r.pedidos[k] || 0) > 0 && r.pref ? r.pref.nombre : r.nombre)}${r.g ? ` <span class="gtag">${ic('layers', 's')}${esc(r.nombre)}</span>` : ''}</div>
+          <div class="t2">Stock ${fNum(r.stock)} · cuando llegue ~${lleg(r)}</div>
+          <div class="t3">Se usa hasta la próxima: ~${pDia(r)}</div><div style="margin-top:6px">${est(r)}</div></div>
+          <div class="mr"><span class="t2">Pedir</span><span class="big">${(r.pedidos[k] || 0) > 0 ? fNum(r.pedidos[k]) : '—'}</span>${r.paquetes[k] ? `<span class="t2">${r.paquetes[k]} × ${r.pk}</span>` : ''}</div></div></td>
+      </tr>`).join('') : emptyRow(6, 'No hace falta pedir nada', 'Con el stock que hay alcanza hasta la próxima entrega.', 'circle-check');
+  },
+
+  paintPlan() {
+    const pe = this.pe, n = Math.min(pe.nEnt, 6), box = $('#pr-plan');
+    if (!n) { box.innerHTML = ''; return; }
+    const filas = pe.filas.filter(r => r.pedidos.slice(0, n).some(x => x > 0));
+    const lab = e => e.hoy ? 'Hoy' : fDiaC(e.d);
+    box.innerHTML = `<thead><tr><th>Producto</th>${pe.ent.slice(0, n).map((e, i) => `<th class="n ${i === S.f.pron.ent ? 'sel' : ''}">${lab(e)}</th>`).join('')}</tr></thead>
+      <tbody>${filas.length ? filas.map(r => `<tr data-pp="${r.key}" class="clk"><td><span class="pname">${esc(r.g && r.pref ? r.pref.nombre : r.nombre)}</span>${r.g ? ` <span class="gtag">${ic('layers', 's')}${esc(r.nombre)}</span>` : ''}</td>${r.pedidos.slice(0, n).map((x, i) => `<td class="n num ${i === S.f.pron.ent ? 'sel' : ''}">${x > 0 ? fNum(x) : '<span class="muted">—</span>'}</td>`).join('')}</tr>`).join('')
+        : `<tr><td colspan="${n + 1}" class="muted" style="padding:16px">En los próximos días no hace falta pedir nada.</td></tr>`}</tbody>
+      ${filas.length ? `<tfoot><tr><td>Total unidades</td>${Array.from({ length: n }, (_, i) => `<td class="n num ${i === S.f.pron.ent ? 'sel' : ''}">${fNum(sum(pe.filas, r => r.pedidos[i] || 0))}</td>`).join('')}</tr></tfoot>` : ''}`;
   },
 
   paintChart({ P, hoy }) {
@@ -1605,8 +1788,10 @@ VIEWS.pronostico = {
     const f = S.f.pron, out = [];
     const add = (i, html, cls = '') => out.push(`<li class="${cls}">${ic(i, 's')}<span>${html}</span></li>`);
     if (M.vacio) { $('#pr-ins').innerHTML = `<li>${ic('hourglass', 's')}<span>Esperando los primeros retiros.</span></li>`; return; }
-    const urg = filas.filter(r => r.estado === 'urgente');
-    if (urg.length) add('siren', `<b>${urg.length === 1 ? esc(urg[0].nombre) + ' se acaba' : urg.length + ' premios se acaban'}</b> antes de que llegue la mercadería (${f.entrega} días): ${urg.slice(0, 4).map(r => `${esc(r.nombre)} ${r.agota <= hoy ? '(ya agotado)' : `(${fechaCorta(r.agota)})`}`).join(', ')}.`, 'bad');
+    const pe = this.pe, urg = pe ? pe.filas.filter(r => r.riesgo) : [];
+    if (urg.length && pe.ent[0]) add('siren', `<b>${urg.length === 1 ? esc(urg[0].nombre) + ' puede faltar' : urg.length + ' productos pueden faltar'}</b> antes de que llegue el pedido ${pe.ent[0].hoy ? `de hoy (~${Math.floor(pe.ent[0].h)}:00)` : `del ${fechaCorta(pe.ent[0].d)}`}: ${urg.slice(0, 4).map(r => esc(r.nombre)).join(', ')}. Si puedes, pide que lo traigan antes.`, 'bad');
+    const sab = pe && pe.ent.slice(0, pe.nEnt).find((e, i) => Math.round((inicioDia(pe.ent[i + 1].d) - inicioDia(e.d)) / DIA_MS) > 1);
+    if (sab) { const i = pe.ent.indexOf(sab); add('calendar-clock', `El pedido del <b>${DOW_SG[sab.d.getDay()]}</b> tiene que alcanzar hasta el ${DOW_SG[pe.ent[i + 1].d.getDay()]} (no hay entrega en el medio): son ${fNum(sum(pe.filas, r => r.pedidos[i] || 0))} unidades estimadas.`); }
     if (M.n >= 7) {
       const ds = [0, 1, 2, 3, 4, 5, 6].filter(d => M.nW[d] > 0);
       const top = ds.reduce((a, b) => M.idx[b] > M.idx[a] ? b : a, ds[0]), low = ds.reduce((a, b) => M.idx[b] < M.idx[a] ? b : a, ds[0]);
@@ -1622,9 +1807,9 @@ VIEWS.pronostico = {
     const tHoy = M.cal ? M.cal.temporadaDe(ymd(hoy)) : null;
     const tTxt = t => t.factor != null ? efectoTxt(Number(t.factor)).toLowerCase() : (M.FT && M.FT.get(nombreBase(t.nombre))) ? `automático, ${efectoTxt(M.fTemp(t)).toLowerCase()}` : 'automático: se ajusta con los primeros días';
     if (tHoy) add('calendar-range', `Estás en <b>${esc(tHoy.nombre)}</b> (hasta el ${fechaCorta(parseYmd(tHoy.fecha_fin))}): ${tTxt(tHoy)}.`);
-    const prox = M.cal ? M.cal.temps.find(t => t.fecha > ymd(hoy) && t.fecha < ymd(addDias(hoy, f.per + f.entrega))) : null;
+    const prox = M.cal ? M.cal.temps.find(t => t.fecha > ymd(hoy) && t.fecha < ymd(addDias(hoy, 8))) : null;
     if (prox) add('calendar-range', `El ${fechaCorta(parseYmd(prox.fecha))} empieza <b>${esc(prox.nombre)}</b>: ${tTxt(prox)}. Ya está en el cálculo.`);
-    for (let i = 0; i < f.per; i++) {
+    for (let i = 0; i < 8; i++) {
       const d = addDias(hoy, i), ff = factorFecha(M, d);
       if (!ff.e) continue;
       add(ff.f === 0 ? 'store' : 'calendar-heart', `${i === 0 ? 'Hoy' : i === 1 ? 'Mañana' : `El ${fechaCorta(d)}`}: <b>${esc(ff.e.nombre)}</b> · ${ff.f === 0 ? 'cerrado, no se cuenta' : ff.txt.toLowerCase()}.`);
@@ -1633,33 +1818,6 @@ VIEWS.pronostico = {
     if (sin.length) add('circle-dashed', `${sin.length} premio(s) sin retiros en las últimas 12 semanas: ${sin.slice(0, 4).map(r => esc(r.nombre)).join(', ')}${sin.length > 4 ? '…' : ''}.`);
     if (bt) add('target', `Precisión: la semana pasada pronosticó ${fU(bt.pred)} y se retiraron ${fU(bt.act)} (${Math.round(bt.semana * 100)}% de diferencia).`);
     $('#pr-ins').innerHTML = out.join('') || `<li>${ic('circle-check', 's')}<span>Todo en orden: nada se acaba en el período.</span></li>`;
-  },
-
-  paintTabla(plan) {
-    const f = S.f.pron, filas = this.filasVisibles();
-    $('#pr-t-sub').textContent = `Para ${f.per} días · margen ${MARGENES[f.margen].t.toLowerCase()} · llega en ${f.entrega} día(s)`;
-    const alc = r => r.sinDatos ? '<span class="muted">Sin retiros</span>' : !r.agota ? '<span class="muted">Más de 4 meses</span>' : r.agota <= plan.hoy ? '<b class="t-out">Agotado</b>' : `${fechaCorta(r.agota)} <span class="muted">(${Math.round((r.agota - plan.hoy) / DIA_MS)} d)</span>`;
-    const comp = r => r.pedido > 0 ? `<b>${fNum(r.pedido)}</b>${r.paquetes ? `<div class="t2">${r.paquetes} ${r.paquetes > 1 ? 'paquetes' : 'paquete'} de ${r.pk}</div>` : ''}` : '<span class="muted">—</span>';
-    const est = r => { const e = ESTADO_PR[r.estado]; return `<span class="badge ${e.c}">${ic(e.i, 's')}${e.t}</span>`; };
-    const nombreCell = r => r.g
-      ? `<div class="pname">${esc(r.nombre)} <span class="gtag">${ic('layers', 's')}${r.ms.length} marcas</span></div><div class="pcode">${r.ms.map(p => `${esc(p.nombre)} ${fNum(p.stock_actual)}`).join(' · ')}</div>`
-      : `<div class="pname">${esc(r.nombre)}</div><div class="pcode">${esc(catName(r.p.categoria_id))}</div>`;
-    const deQue = r => r.pedido > 0 && r.g ? `<div class="t2">${r.pref ? `de ${esc(r.pref.nombre)}` : 'de cualquier marca'}</div>` : '';
-    const pDia = r => r.porDia < 10 ? r.porDia.toFixed(1).replace('.', ',') : fU(r.porDia);
-    $('#pr-tb').innerHTML = filas.length ? filas.map(r => `
-      <tr data-pp="${r.key}" class="clk" title="Ver el detalle de ${esc(r.nombre)}">
-        <td><div class="pcell">${thumb(r.p)}<div style="min-width:0">${nombreCell(r)}</div></div></td>
-        <td class="n num">${fNum(r.stock)}</td>
-        <td class="n num">${r.sinDatos ? '—' : pDia(r)}</td>
-        <td class="n num">${r.sinDatos ? '—' : `~${fU(r.necesita)}<div class="t2">${fU(r.lo)} a ${fU(r.hi)}</div>`}</td>
-        <td>${alc(r)}</td>
-        <td class="n num">${comp(r)}${deQue(r)}</td>
-        <td>${est(r)}</td>
-        <td class="mob"><div class="mrow">${thumb(r.p)}<div class="grow"><div class="t1">${esc(r.nombre)}${r.g ? ` <span class="gtag">${ic('layers', 's')}${r.ms.length} marcas</span>` : ''}</div>
-          <div class="t2">Stock ${fNum(r.stock)}${r.sinDatos ? '' : ` · ~${pDia(r)} por día`}</div>
-          <div class="t3">Alcanza hasta: ${alc(r)}</div><div style="margin-top:6px">${est(r)}</div></div>
-          <div class="mr"><span class="t2">Comprar</span><span class="big">${r.pedido > 0 ? fNum(r.pedido) : '—'}</span>${r.paquetes ? `<span class="t2">${r.paquetes} × ${r.pk}</span>` : ''}${r.pedido > 0 && r.g && r.pref ? `<span class="t2">${esc(r.pref.nombre)}</span>` : ''}</div></div></td>
-      </tr>`).join('') : emptyRow(7, f.soloComprar ? 'No hace falta comprar nada' : 'No hay premios activos', f.soloComprar ? 'Con el stock actual alcanza para todo el período.' : '', 'circle-check');
   },
 
   paintFechas() {
@@ -1749,6 +1907,8 @@ function modalPronPremio(key) {
   const v = VIEWS.pronostico, plan = v.plan; if (!plan) return;
   const r = plan.filas.find(x => x.key === key); if (!r) return;
   const f = S.f.pron, hoy = plan.hoy, pr = plan.P.get(key);
+  const pe = v.pe, pr0 = pe ? pe.filas.find(x => x.key === key) : null;
+  const prox = pr0 && pe.nEnt ? pe.ent.slice(0, Math.min(pe.nEnt, 6)).map((e, i) => `${e.hoy ? 'hoy' : fDiaC(e.d)}: <b>${pr0.pedidos[i] ? fNum(pr0.pedidos[i]) : '—'}</b>`).join(' · ') : '';
   const ids = new Set(r.ms.map(p => p.id));
   const regPorDia = new Map();
   salidasVig().filter(m => ids.has(m.premio_id)).forEach(m => { const k = ymd(m.creado_en); regPorDia.set(k, (regPorDia.get(k) || 0) + qtyEf(m)); });
@@ -1758,9 +1918,10 @@ function modalPronPremio(key) {
     body: `<div class="kpis k3" style="margin-bottom:12px">
         <div class="kpi"><span class="kpi-l">Stock${r.g ? ' del grupo' : ''}</span><span class="kpi-v">${fNum(r.stock)}</span><span class="kpi-s">Mínimo ${fNum(r.minimo)}</span></div>
         <div class="kpi"><span class="kpi-l">Por día</span><span class="kpi-v">${r.sinDatos ? '—' : r.porDia.toFixed(1).replace('.', ',')}</span><span class="kpi-s">${r.t && r.t.fal ? `Incluye ${Math.round(r.t.m * 100)}% de faltantes` : r.g ? 'Todas las marcas juntas' : 'Promedio reciente'}</span></div>
-        <div class="kpi"><span class="kpi-l">Comprar</span><span class="kpi-v">${r.pedido ? fNum(r.pedido) : '—'}</span><span class="kpi-s">${r.pedido && r.g ? (r.pref ? `De ${esc(r.pref.nombre)}` : 'De cualquier marca') : ''}${r.paquetes ? `${r.pedido && r.g ? ' · ' : ''}${r.paquetes} paquete(s) de ${r.pk}` : r.sinDatos ? 'Sin retiros recientes' : r.pedido && r.g ? '' : `Cubre ~${fU(r.cubre || 0)} en ${f.per} días`}</span></div>
+        <div class="kpi"><span class="kpi-l">${pr0 && pe.ent[0] && pe.ent[0].hoy ? 'Pedir hoy' : 'Próximo pedido'}</span><span class="kpi-v">${pr0 && pr0.pedidos[0] ? fNum(pr0.pedidos[0]) : '—'}</span><span class="kpi-s">${pr0 && pr0.pedidos[0] && r.g ? (r.pref ? `De ${esc(r.pref.nombre)}` : 'De cualquier marca') : r.sinDatos ? 'Sin retiros recientes' : pr0 && !pr0.pedidos[0] ? 'Alcanza con lo que hay' : ''}</span></div>
       </div>
       ${r.g ? `<ul class="list" style="margin:0 0 12px">${r.ms.map(p => `<li>${thumb(p)}<div class="grow"><div class="t1">${esc(p.nombre)}${r.pref && r.pref.id === p.id ? ' <span class="badge ok">Se compra esta</span>' : ''}</div><div class="t2">${p.stock_actual > 0 ? `${fNum(p.stock_actual)} en stock` : 'Sin stock de esta marca'}</div></div></li>`).join('')}</ul>` : ''}
+      ${prox ? `<p class="muted small" style="margin:0 0 10px">Pedidos sugeridos: ${prox}</p>` : ''}
       <div class="chart-box" style="height:240px;padding:0"><canvas id="pp-ch" aria-label="Consumo de ${esc(r.nombre)}"></canvas></div>
       <p class="muted" style="margin:10px 0 0">${r.sinDatos ? 'Sin retiros en las últimas 12 semanas.' : !r.agota ? 'Con el consumo actual alcanza por más de 4 meses.' : r.agota <= hoy ? (r.g ? 'No queda ninguna marca.' : 'Está agotado.') : `Al ritmo actual ${r.g ? 'el grupo' : ''} se acaba el <b>${fechaCorta(r.agota)}</b>.`}
       ${r.g && !r.pref ? ' Elige en "Grupos de marcas" cuál conviene comprar.' : ''}

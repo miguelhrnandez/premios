@@ -837,3 +837,26 @@ h1, h2, h3, .top h1, .login-card h1, .g-hero h2, .kpi-v { letter-spacing: -.015e
   .grp-m { flex-wrap: wrap; }
   .grp-m .pref { margin-left: 28px; }
 }
+
+/* Pedido al proveedor */
+.chips.dias .chip { min-width: 44px; justify-content: center; }
+.ped-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-bottom: 6px; }
+.btn.wa { border-color: #1fa855; color: #13803f; }
+.btn.wa:hover { background: #e7f7ee; }
+:root[data-theme="dark"] .btn.wa { color: #5fd68f; border-color: #2f8f57; }
+:root[data-theme="dark"] .btn.wa:hover { background: #13301f; }
+.big-n { font-size: 17px; }
+.plan-wrap { overflow-x: auto; }
+.plan-t { min-width: 560px; }
+.plan-t th, .plan-t td { white-space: nowrap; }
+.plan-t td:first-child, .plan-t th:first-child { position: sticky; left: 0; background: var(--surface); z-index: 1; }
+.plan-t .sel { background: var(--accent-soft); }
+.plan-t td.sel { font-weight: 700; color: var(--ink); }
+.plan-t tfoot td { font-weight: 700; border-top: 1px solid var(--line-2); }
+.plan-t tr.clk { cursor: pointer; }
+@media (max-width: 760px) {
+  .chips.dias { flex-wrap: nowrap; overflow-x: auto; }
+  .chips.dias .chip { min-width: 0; flex: 1; padding-left: 6px; padding-right: 6px; }
+  .ped-bar .row { width: 100%; }
+  .ped-bar .row .btn { flex: 1 1 auto; justify-content: center; }
+}

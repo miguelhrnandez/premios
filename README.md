@@ -168,7 +168,7 @@ Para productos con varias marcas (por ejemplo, turrones o alfajores), lo que imp
 - El aviso de "Stock bajo" o "Sin stock" se da por el total del grupo contra su mínimo, una sola vez por grupo.
 - El pronóstico suma el consumo de todas las marcas, solo cuenta un día como "sin stock" cuando no quedaba ninguna, y sugiere comprar la marca elegida.
 
-### Pronóstico y compras (solo administrador)
+### Pronóstico y pedidos (solo administrador)
 
 Aprende de cada retiro y calcula cuánto vas a necesitar:
 
@@ -178,7 +178,10 @@ Aprende de cada retiro y calcula cuánto vas a necesitar:
 - **Faltantes de inventario**: se suman como un % extra por premio.
 - **Fechas especiales y temporadas**: cierres (1/1, 1/5, 25/12, Día del Empleado de Comercio) cuentan como 0; los feriados en que se abre y las temporadas (vacaciones de verano e invierno, vuelta a clases, fiestas) se aprenden solos comparando con las semanas anteriores y, desde el año siguiente, con la misma temporada del año pasado. También se les puede poner un % a mano.
 - **Ritmo de hoy**: aprende a qué hora se retira cada parte del día; si hoy viene más movido, lo avisa y lo suma al cálculo.
-- **Pedido sugerido**: cubre el período elegido (7, 14 o 30 días) con el margen de seguridad elegido (Normal 90 %, Alto 95 % o Máximo 99 % de los escenarios) y deja al menos el stock mínimo. Si el premio tiene cargadas las unidades por caja, el pedido se redondea a cajas completas.
+- **Pedido al proveedor**: se configura qué días entrega el proveedor (por defecto de lunes a sábado), a qué hora suele llegar y si entrega en feriados. Cada pedido alcanza desde que llega hasta que llega la entrega siguiente: el del sábado cubre el domingo y el lunes hasta la entrega. Usa el margen de seguridad elegido (Normal 90 %, Alto 95 % o Máximo 99 % de los escenarios) y deja al menos el stock mínimo. Si el premio tiene cargadas las unidades por caja, se redondea a cajas completas.
+- **Plan de la semana**: los pedidos estimados de las próximas entregas, encadenados (cada uno cuenta con lo que sobra del anterior). Se recalcula cada día.
+- **Copiar / WhatsApp**: el pedido del día sale como texto listo para mandarle al proveedor.
+- **En riesgo**: avisa si algo se puede acabar antes de que llegue el pedido de hoy.
 - **Precisión**: compara lo que habría pronosticado la semana pasada con lo que realmente se retiró.
 
 ### Exportaciones
