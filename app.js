@@ -49,7 +49,8 @@ const TIPOS = {
 const ESTADOS = {
   ok:      { t: 'Stock correcto', c: 'ok' },
   bajo:    { t: 'Stock bajo',     c: 'low' },
-  agotado: { t: 'Sin stock',      c: 'out' }
+  agotado: { t: 'Sin stock',      c: 'out' },
+  marca:   { t: 'Sin esta marca', c: 'mute' }
 };
 const ALERTAS = {
   stock_bajo:            { t: 'Stock bajo',               i: 'triangle-alert', c: 'warn' },
@@ -123,7 +124,27 @@ const premio = id => S.premios.find(p => p.id === Number(id));
 const pNombre = m => (premio(m.premio_id) || {}).nombre || m.premio_nombre;
 const catName = id => (S.categorias.find(c => c.id === id) || {}).nombre || 'Sin categoría';
 const perfilDe = id => S.perfiles.find(p => p.id === id);
-const estadoDe = p => p.stock_actual <= 0 ? 'agotado' : (p.stock_actual <= p.stock_minimo ? 'bajo' : 'ok');
+// Grupos de marcas que se reemplazan (migración 09): lo que importa es el total del grupo
+const grupoDe = p => p && p.grupo_id ? (S.grupos || []).find(g => g.id === p.grupo_id) || null : null;
+const miembrosDe = g => S.premios.filter(p => p.grupo_id === g.id && p.activo).sort(byName);
+const stockGrupo = g => miembrosDe(g).reduce((s, p) => s + Math.max(0, p.stock_actual), 0);
+const estadoGrupo = g => { const t = stockGrupo(g); return t <= 0 ? 'agotado' : t <= (g.stock_minimo || 0) ? 'bajo' : 'ok'; };
+const estadoPropio = p => p.stock_actual <= 0 ? 'agotado' : (p.stock_actual <= p.stock_minimo ? 'bajo' : 'ok');
+// 'marca' = esta marca no tiene, pero el grupo sí: no es alerta
+const estadoDe = p => { const g = grupoDe(p); if (!g) return estadoPropio(p); const e = estadoGrupo(g); return e !== 'ok' ? e : (p.stock_actual <= 0 ? 'marca' : 'ok'); };
+const enAlerta = p => ['bajo', 'agotado'].includes(estadoDe(p));
+// Unidades de control: cada grupo cuenta una vez; cada premio suelto, una vez
+function unidadesStock() {
+  const out = [], vistos = new Set();
+  S.premios.filter(p => p.activo).forEach(p => {
+    const g = grupoDe(p);
+    if (!g) { out.push({ p, nombre: p.nombre, stock: p.stock_actual, minimo: p.stock_minimo, estado: estadoPropio(p) }); return; }
+    if (vistos.has(g.id)) return; vistos.add(g.id);
+    const ms = miembrosDe(g), pref = ms.find(x => x.id === g.preferido_id) || ms[0];
+    out.push({ g, p: pref, nombre: g.nombre, stock: stockGrupo(g), minimo: g.stock_minimo || 0, estado: estadoGrupo(g), n: ms.length });
+  });
+  return out;
+}
 const qtyEf = m => m.estado === 'anulado' ? 0 : (m.cantidad_corregida ?? m.cantidad);
 const salidasVig = (arr = S.movs) => arr.filter(m => m.tipo === 'salida' && m.estado !== 'anulado');
 // faltantes: ajustes (inventario o manuales) que bajaron stock → salidas "sin identificar"
@@ -151,8 +172,9 @@ const optSectores = (sel, todos) => (todos ? S.sectores.slice().sort((a, b) => a
 
 const badgeEstado = p => {
   if (!p.activo) return '<span class="badge mute"><span class="d"></span>Desactivado</span>';
-  const e = ESTADOS[estadoDe(p)];
-  return `<span class="badge ${e.c}"><span class="d"></span>${e.t}</span>`;
+  const k = estadoDe(p), e = ESTADOS[k], g = grupoDe(p);
+  const t = g && k === 'bajo' ? `Stock bajo en ${esc(g.nombre)}` : g && k === 'agotado' ? `Sin ${esc(g.nombre)}` : e.t;
+  return `<span class="badge ${e.c}" ${k === 'marca' ? `title="Hay otras marcas de ${esc(g.nombre)}"` : ''}><span class="d"></span>${t}</span>`;
 };
 const badgeTipo = t => `<span class="badge t-${t}">${ic(TIPOS[t].i)}${TIPOS[t].t}</span>`;
 // Logo Más Dueños: isotipo (si se subió icons/isotipo.png) + "MásDueños"
@@ -160,6 +182,7 @@ const ISOTIPO = ''; // p. ej. 'icons/isotipo.png' cuando se suba el isotipo ofic
 const marca = (sub, cls = '') => `<div class="marca ${cls}">${ISOTIPO ? `<img class="marca-iso" src="${ISOTIPO}" alt="">` : ''}<div style="min-width:0"><div class="marca-w" role="img" aria-label="Más Dueños"><span>Más</span><b>Dueños</b></div>${sub != null ? `<div class="marca-s">${sub}</div>` : ''}</div></div>`;
 const thumb = (p, lg) => `<div class="thumb ${lg ? 'lg' : ''}">${p && p.imagen_url ? `<img src="${esc(p.imagen_url)}" alt="" loading="lazy">` : ic('gift', lg ? 'l' : '')}</div>`;
 const stockSpan = p => `<span data-stock="${p.id}">${fNum(p.stock_actual)}</span>`;
+const grupoTag = p => { const g = grupoDe(p); return g ? `<span class="gtag" title="Marcas que se reemplazan entre sí">${ic('layers', 's')}${esc(g.nombre)}: ${fNum(stockGrupo(g))} en total</span>` : ''; };
 function lvl(p) {
   const e = estadoDe(p);
   const cap = p.stock_minimo > 0 ? p.stock_minimo * 3 : Math.max(p.stock_actual, 1);
@@ -240,6 +263,10 @@ function createAPI(sb) {
     async inventarioDetalle(id) { return T(await sb.from('inventario_detalle').select('*').eq('inventario_id', id).order('premio_nombre')); },
     async auditoria() { return T(await sb.from('auditoria').select('*').order('id', { ascending: false }).limit(2000)); },
     async rpc(fn, args) { return T(await sb.rpc(fn, args)); },
+    async grupos() { return T(await sb.from('grupos_premio').select('*').order('nombre')); },
+    async crearGrupo(d) { return T(await sb.from('grupos_premio').insert(d).select().single()); },
+    async editarGrupo(id, d) { return T(await sb.from('grupos_premio').update(d).eq('id', id).select().single()); },
+    async borrarGrupo(id) { T(await sb.from('grupos_premio').delete().eq('id', id)); },
     async fechasEspeciales() { return T(await sb.from('fechas_especiales').select('*').order('fecha')); },
     async crearFecha(d) { return T(await sb.from('fechas_especiales').insert(d).select().single()); },
     async editarFecha(id, d) { return T(await sb.from('fechas_especiales').update(d).eq('id', id).select().single()); },
@@ -333,6 +360,9 @@ async function loadAll() {
   // Fechas especiales (migración 08): si la tabla todavía no existe, la app sigue funcionando
   S.especialesErr = false;
   try { S.especiales = API.fechasEspeciales ? await API.fechasEspeciales() : []; } catch (e) { S.especiales = []; S.especialesErr = true; }
+  // Grupos de marcas (migración 09)
+  S.gruposErr = false;
+  try { S.grupos = API.grupos ? await API.grupos() : []; } catch (e) { S.grupos = []; S.gruposErr = true; }
   const me = perfiles.find(p => p.id === S.perfil.id);
   if (me) S.perfil = me;
 }
@@ -853,9 +883,9 @@ function applyFlashes() {
 }
 function updateNavBadge() {
   const c = $('#nav-cnt'); if (!c) return;
-  const n = S.premios.filter(p => p.activo && estadoDe(p) !== 'ok').length;
+  const n = unidadesStock().filter(u => u.estado !== 'ok').length;
   c.textContent = n; c.classList.toggle('hide', n === 0);
-  c.title = `${n} premio(s) con stock bajo o sin stock`;
+  c.title = `${n} premio(s) o grupo(s) con stock bajo o sin stock`;
 }
 
 /* ---------------- gráficos ---------------- */
@@ -1068,7 +1098,10 @@ function calendario(especiales) {
   return { dia, temps, temporadaDe };
 }
 
-function modeloPronostico({ hasta = inicioDia(new Date()), movs = S.movs, especiales = S.especiales || [], ventana = 84 } = {}) {
+// Clave de pronóstico: las marcas de un mismo grupo se cuentan juntas ('g12'); el resto, por premio ('p5')
+const clavePron = pid => { const p = (S.premios || []).find(x => x.id === pid); const g = p && p.grupo_id && (S.grupos || []).some(x => x.id === p.grupo_id); return g ? 'g' + p.grupo_id : 'p' + pid; };
+
+function modeloPronostico({ hasta = inicioDia(new Date()), movs = S.movs, especiales = S.especiales || [], ventana = 84, clave = clavePron } = {}) {
   const fin = inicioDia(hasta);
   const cal = calendario(especiales), esp = cal.dia;
   const regDia = new Map();            // 'yyyy-mm-dd' -> Map(premio_id -> unidades registradas)
@@ -1086,11 +1119,12 @@ function modeloPronostico({ hasta = inicioDia(new Date()), movs = S.movs, especi
     if (esSal) { const k0 = ymd(d); totAll.set(k0, (totAll.get(k0) || 0) + qtyEf(m)); if (!primeroAll || d < primeroAll) primeroAll = d; }
     if (d < desdeMin) continue;
     if (esSal && (!primero || d < primero)) primero = d;
-    if (esFal) { falTot.set(m.premio_id, (falTot.get(m.premio_id) || 0) + uFalt(m)); continue; }
+    const ck = clave(m.premio_id);
+    if (esFal) { falTot.set(ck, (falTot.get(ck) || 0) + uFalt(m)); continue; }
     const k = ymd(d), q = qtyEf(m);
     if (!regDia.has(k)) regDia.set(k, new Map());
-    const mp = regDia.get(k); mp.set(m.premio_id, (mp.get(m.premio_id) || 0) + q);
-    regTot.set(m.premio_id, (regTot.get(m.premio_id) || 0) + q);
+    const mp = regDia.get(k); mp.set(ck, (mp.get(ck) || 0) + q);
+    regTot.set(ck, (regTot.get(ck) || 0) + q);
   }
   const vacio = { vacio: true, n: 0, idx: [1, 1, 1, 1, 1, 1, 1], nW: [0, 0, 0, 0, 0, 0, 0], tr: 1, ratio: null, F: 1, nFer: 0, R: 0, tasas: new Map(), merma: 0, fin, esp, cal, FT: new Map(), totDia: new Map() };
   if (!primero) return vacio;
@@ -1107,23 +1141,25 @@ function modeloPronostico({ hasta = inicioDia(new Date()), movs = S.movs, especi
   const n = normales.length;
   if (!n) return Object.assign(vacio, { vacio: false, n: 0 });
 
-  // 0. Días sin stock por premio: ese día se retiró poco porque no había, no porque se pidiera menos.
-  //    Se excluyen al calcular el consumo de ese premio (si no, el pedido saldría corto).
-  const sinStock = new Map(); // premio_id -> Set('yyyy-mm-dd')
+  // 0. Días sin stock: ese día se retiró poco porque no había, no porque se pidiera menos.
+  //    Se excluyen al calcular el consumo (si no, el pedido saldría corto). En un grupo de marcas
+  //    solo cuenta como "sin stock" cuando no quedaba ninguna marca.
+  const sinStock = new Map(); // clave -> Set('yyyy-mm-dd')
   {
-    const porP = new Map();
-    movs.forEach(m => { if (m.stock_nuevo == null) return; const d = new Date(m.creado_en); if (d >= fin) return; if (!porP.has(m.premio_id)) porP.set(m.premio_id, []); porP.get(m.premio_id).push(m); });
+    const porK = new Map();
+    movs.forEach(m => { if (m.stock_nuevo == null) return; const d = new Date(m.creado_en); if (d >= fin) return; const ck = clave(m.premio_id); if (!porK.has(ck)) porK.set(ck, []); porK.get(ck).push(m); });
     const ini0 = dias[0].d;
-    porP.forEach((arr, pid) => {
+    porK.forEach((arr, ck) => {
       arr.sort((a, b) => a.id - b.id);
-      const set = new Set(); let i = 0, stock = 0, hay = false;
-      while (i < arr.length && new Date(arr[i].creado_en) < ini0) { stock = arr[i].stock_nuevo; hay = true; i++; }
+      const set = new Set(), st = new Map(); let i = 0, tot = 0;
+      const aplicar = m => { tot += m.stock_nuevo - (st.get(m.premio_id) || 0); st.set(m.premio_id, m.stock_nuevo); };
+      while (i < arr.length && new Date(arr[i].creado_en) < ini0) aplicar(arr[i++]);
       for (let d = ini0; d < fin; d = addDias(d, 1)) {
-        const fd = addDias(d, 1); let min = hay ? stock : 0;
-        while (i < arr.length && new Date(arr[i].creado_en) < fd) { stock = arr[i].stock_nuevo; hay = true; min = Math.min(min, stock); i++; }
+        const fd = addDias(d, 1); let min = st.size ? tot : 0;
+        while (i < arr.length && new Date(arr[i].creado_en) < fd) { aplicar(arr[i++]); min = Math.min(min, tot); }
         if (min <= 0) set.add(ymd(d));
       }
-      sinStock.set(pid, set);
+      sinStock.set(ck, set);
     });
   }
 
@@ -1306,13 +1342,13 @@ function backtest(movs = S.movs, especiales = S.especiales || []) {
 }
 
 // Cuántas unidades se retiraron hoy (por premio)
-function retiradoHoy(movs = S.movs) {
+function retiradoHoy(movs = S.movs, clave = clavePron) {
   const k = ymd(new Date()), mp = new Map();
-  movs.forEach(m => { if (m.tipo === 'salida' && m.estado !== 'anulado' && ymd(m.creado_en) === k) mp.set(m.premio_id, (mp.get(m.premio_id) || 0) + qtyEf(m)); });
+  movs.forEach(m => { if (m.tipo === 'salida' && m.estado !== 'anulado' && ymd(m.creado_en) === k) { const ck = clave(m.premio_id); mp.set(ck, (mp.get(ck) || 0) + qtyEf(m)); } });
   return mp;
 }
 
-// Plan completo para la vista: pedido sugerido, fecha en que se acaba, etc.
+// Plan completo para la vista: una fila por grupo de marcas o por premio suelto
 function planCompras({ per = 7, entrega = 3, margen = 'alto' } = {}) {
   const z = (MARGENES[margen] || MARGENES.alto).z;
   const hoy = inicioDia(new Date());
@@ -1320,30 +1356,34 @@ function planCompras({ per = 7, entrega = 3, margen = 'alto' } = {}) {
   const hoyReg = retiradoHoy();
   const largo = Math.max(per, 120);
   const P = proyectar(M, hoy, largo, hoyReg);
-  const filas = S.premios.filter(p => p.activo).map(p => {
-    const t = M.tasas.get(p.id), pr = P.get(p.id);
-    if (!t || !pr || (t.reg === 0 && t.fal === 0)) return { p, sinDatos: true, necesita: 0, pedido: 0, estado: 'sin', porDia: 0, lo: 0, hi: 0, agota: null };
+  const filas = unidadesStock().map(u => {
+    const key = u.g ? 'g' + u.g.id : 'p' + u.p.id;
+    const p = u.p, g = u.g || null, ms = g ? miembrosDe(g) : [p];
+    const pref = g ? (ms.find(x => x.id === g.preferido_id) || null) : p;
+    const base = { key, p, g, ms, pref, nombre: u.nombre, stock: u.stock, minimo: u.minimo };
+    const t = M.tasas.get(key), pr = P.get(key);
+    if (!t || !pr || (t.reg === 0 && t.fal === 0)) return { ...base, sinDatos: true, necesita: 0, pedido: 0, estado: 'sin', porDia: 0, lo: 0, hi: 0, agota: null };
     const e = pr.e.slice(0, per), v = pr.v.slice(0, per);
     const necesita = sum(e);
     // variación día a día + error de estimar el nivel y la tendencia (afecta a todo el período junto)
     const sd = Math.sqrt(sum(v) + necesita * necesita * (t.relVar + (M.trRelVar || 0)));
     const lo = Math.max(0, necesita - Z80 * sd), hi = necesita + Z80 * sd;
-    // ¿cuándo se acaba?
+    // ¿cuándo se acaba? (en un grupo: cuando no queda ninguna marca)
     let acum = 0, agota = null;
-    if (p.stock_actual <= 0) agota = hoy;
-    else for (let i = 0; i < largo; i++) { acum += pr.e[i]; if (acum > p.stock_actual) { agota = addDias(hoy, i); break; } }
-    let pedido = Math.ceil(necesita + z * sd + (p.stock_minimo || 0) - p.stock_actual);
+    if (u.stock <= 0) agota = hoy;
+    else for (let i = 0; i < largo; i++) { acum += pr.e[i]; if (acum > u.stock) { agota = addDias(hoy, i); break; } }
+    let pedido = Math.ceil(necesita + z * sd + (u.minimo || 0) - u.stock);
     if (necesita <= 0.05) pedido = 0;
     pedido = Math.max(0, pedido);
-    const pk = Number(p.unidades_por_paquete) || 0;
+    const pk = Number((pref || p).unidades_por_paquete) || 0;
     const paquetes = pk > 1 && pedido > 0 ? Math.ceil(pedido / pk) : 0;
     if (paquetes) pedido = paquetes * pk;
     const llega = addDias(hoy, entrega);
-    const estado = (p.stock_actual <= 0 || (agota && agota < llega)) ? 'urgente' : pedido > 0 ? 'comprar' : 'ok';
-    return { p, t, necesita, lo, hi, cubre: necesita + z * sd, agota, pedido, paquetes, pk, estado, porDia: t.r * (1 + t.m) * M.tr };
+    const estado = (u.stock <= 0 || (agota && agota < llega)) ? 'urgente' : pedido > 0 ? 'comprar' : 'ok';
+    return { ...base, t, necesita, lo, hi, cubre: necesita + z * sd, agota, pedido, paquetes, pk, estado, porDia: t.r * (1 + t.m) * M.tr };
   });
   const orden = { urgente: 0, comprar: 1, ok: 2, sin: 3 };
-  filas.sort((a, b) => orden[a.estado] - orden[b.estado] || (a.agota && b.agota ? a.agota - b.agota : a.agota ? -1 : b.agota ? 1 : 0) || b.necesita - a.necesita || a.p.nombre.localeCompare(b.p.nombre, 'es'));
+  filas.sort((a, b) => orden[a.estado] - orden[b.estado] || (a.agota && b.agota ? a.agota - b.agota : a.agota ? -1 : b.agota ? 1 : 0) || b.necesita - a.necesita || a.nombre.localeCompare(b.nombre, 'es'));
   return { M, P, hoy, hoyReg, filas, rit: ritmoHoy(M, hoyReg), z };
 }
 
@@ -1442,18 +1482,20 @@ VIEWS.pronostico = {
     $('#pr-todas').onclick = () => { f.todas = !f.todas; this.paintFechas(); icons(); };
     $('#pr-addf').onclick = () => modalFecha();
     $('#pr-fechas').onclick = e => { const b = e.target.closest('[data-fe]'); if (b) modalFecha((S.especiales || []).find(x => x.id === +b.dataset.fe)); };
-    $('#pr-tb').onclick = e => { const r = e.target.closest('[data-pp]'); if (r) modalPronPremio(+r.dataset.pp); };
+    $('#pr-tb').onclick = e => { const r = e.target.closest('[data-pp]'); if (r) modalPronPremio(r.dataset.pp); };
     bindExp(el, 'pr', () => ({
       base: 'lista_de_compras',
       title: `Qué comprar: próximos ${f.per} días (margen ${MARGENES[f.margen].t.toLowerCase()}, la mercadería tarda ${f.entrega} días)`,
       cols: [
-        { h: 'Premio', v: r => r.p.nombre },
-        { h: 'Stock actual', v: r => r.p.stock_actual },
+        { h: 'Premio o grupo', v: r => r.nombre },
+        { h: 'Marcas', v: r => r.g ? r.ms.map(p => `${p.nombre} (${p.stock_actual})`).join(', ') : '' },
+        { h: 'Stock actual', v: r => r.stock },
         { h: 'Consumo por día', v: r => r.sinDatos ? 0 : Math.round(r.porDia * 10) / 10 },
         { h: `Necesario ${f.per} días`, v: r => Math.round(r.necesita) },
         { h: 'Rango probable', v: r => r.sinDatos ? '' : `${Math.round(r.lo)} a ${Math.round(r.hi)}` },
         { h: 'Alcanza hasta', v: r => r.sinDatos ? 'Sin retiros' : !r.agota ? 'Más de 4 meses' : r.agota <= this.plan.hoy ? 'Agotado' : fFecha(r.agota) },
         { h: 'Comprar (unidades)', v: r => r.pedido },
+        { h: 'Marca a comprar', v: r => r.pedido > 0 ? (r.pref ? r.pref.nombre : 'Cualquiera') : '' },
         { h: 'Paquetes', v: r => r.paquetes ? `${r.paquetes} x ${r.pk}` : '' },
         { h: 'Estado', v: r => ESTADO_PR[r.estado].t }
       ],
@@ -1564,7 +1606,7 @@ VIEWS.pronostico = {
     const add = (i, html, cls = '') => out.push(`<li class="${cls}">${ic(i, 's')}<span>${html}</span></li>`);
     if (M.vacio) { $('#pr-ins').innerHTML = `<li>${ic('hourglass', 's')}<span>Esperando los primeros retiros.</span></li>`; return; }
     const urg = filas.filter(r => r.estado === 'urgente');
-    if (urg.length) add('siren', `<b>${urg.length === 1 ? esc(urg[0].p.nombre) + ' se acaba' : urg.length + ' premios se acaban'}</b> antes de que llegue la mercadería (${f.entrega} días): ${urg.slice(0, 4).map(r => `${esc(r.p.nombre)} ${r.agota <= hoy ? '(ya agotado)' : `(${fechaCorta(r.agota)})`}`).join(', ')}.`, 'bad');
+    if (urg.length) add('siren', `<b>${urg.length === 1 ? esc(urg[0].nombre) + ' se acaba' : urg.length + ' premios se acaban'}</b> antes de que llegue la mercadería (${f.entrega} días): ${urg.slice(0, 4).map(r => `${esc(r.nombre)} ${r.agota <= hoy ? '(ya agotado)' : `(${fechaCorta(r.agota)})`}`).join(', ')}.`, 'bad');
     if (M.n >= 7) {
       const ds = [0, 1, 2, 3, 4, 5, 6].filter(d => M.nW[d] > 0);
       const top = ds.reduce((a, b) => M.idx[b] > M.idx[a] ? b : a, ds[0]), low = ds.reduce((a, b) => M.idx[b] < M.idx[a] ? b : a, ds[0]);
@@ -1575,7 +1617,7 @@ VIEWS.pronostico = {
     else if (semAnt > 0 && Math.abs(semAct / semAnt - 1) >= 0.2 && new Date().getDay() !== 1) add('activity', `Esta semana va ${pct(semAct / semAnt - 1)} contra la semana pasada a esta altura.`);
     const tot = sum(filas.filter(r => !r.sinDatos), r => r.necesita);
     const big = filas.filter(r => !r.sinDatos).sort((a, b) => b.necesita - a.necesita)[0];
-    if (big && tot > 0 && big.necesita / tot > 0.25) add('crown', `<b>${esc(big.p.nombre)}</b> es el ${Math.round(big.necesita / tot * 100)}% de todo lo que se va a retirar.`);
+    if (big && tot > 0 && big.necesita / tot > 0.25) add('crown', `<b>${esc(big.nombre)}</b> es el ${Math.round(big.necesita / tot * 100)}% de todo lo que se va a retirar.`);
     if (M.merma > 0.02) add('scale', `Los faltantes de inventario suman un <b>${Math.round(M.merma * 100)}% extra</b> sobre lo registrado; el pedido ya los contempla.`);
     const tHoy = M.cal ? M.cal.temporadaDe(ymd(hoy)) : null;
     const tTxt = t => t.factor != null ? efectoTxt(Number(t.factor)).toLowerCase() : (M.FT && M.FT.get(nombreBase(t.nombre))) ? `automático, ${efectoTxt(M.fTemp(t)).toLowerCase()}` : 'automático: se ajusta con los primeros días';
@@ -1588,7 +1630,7 @@ VIEWS.pronostico = {
       add(ff.f === 0 ? 'store' : 'calendar-heart', `${i === 0 ? 'Hoy' : i === 1 ? 'Mañana' : `El ${fechaCorta(d)}`}: <b>${esc(ff.e.nombre)}</b> · ${ff.f === 0 ? 'cerrado, no se cuenta' : ff.txt.toLowerCase()}.`);
     }
     const sin = filas.filter(r => r.sinDatos);
-    if (sin.length) add('circle-dashed', `${sin.length} premio(s) sin retiros en las últimas 12 semanas: ${sin.slice(0, 4).map(r => esc(r.p.nombre)).join(', ')}${sin.length > 4 ? '…' : ''}.`);
+    if (sin.length) add('circle-dashed', `${sin.length} premio(s) sin retiros en las últimas 12 semanas: ${sin.slice(0, 4).map(r => esc(r.nombre)).join(', ')}${sin.length > 4 ? '…' : ''}.`);
     if (bt) add('target', `Precisión: la semana pasada pronosticó ${fU(bt.pred)} y se retiraron ${fU(bt.act)} (${Math.round(bt.semana * 100)}% de diferencia).`);
     $('#pr-ins').innerHTML = out.join('') || `<li>${ic('circle-check', 's')}<span>Todo en orden: nada se acaba en el período.</span></li>`;
   },
@@ -1599,19 +1641,24 @@ VIEWS.pronostico = {
     const alc = r => r.sinDatos ? '<span class="muted">Sin retiros</span>' : !r.agota ? '<span class="muted">Más de 4 meses</span>' : r.agota <= plan.hoy ? '<b class="t-out">Agotado</b>' : `${fechaCorta(r.agota)} <span class="muted">(${Math.round((r.agota - plan.hoy) / DIA_MS)} d)</span>`;
     const comp = r => r.pedido > 0 ? `<b>${fNum(r.pedido)}</b>${r.paquetes ? `<div class="t2">${r.paquetes} ${r.paquetes > 1 ? 'paquetes' : 'paquete'} de ${r.pk}</div>` : ''}` : '<span class="muted">—</span>';
     const est = r => { const e = ESTADO_PR[r.estado]; return `<span class="badge ${e.c}">${ic(e.i, 's')}${e.t}</span>`; };
+    const nombreCell = r => r.g
+      ? `<div class="pname">${esc(r.nombre)} <span class="gtag">${ic('layers', 's')}${r.ms.length} marcas</span></div><div class="pcode">${r.ms.map(p => `${esc(p.nombre)} ${fNum(p.stock_actual)}`).join(' · ')}</div>`
+      : `<div class="pname">${esc(r.nombre)}</div><div class="pcode">${esc(catName(r.p.categoria_id))}</div>`;
+    const deQue = r => r.pedido > 0 && r.g ? `<div class="t2">${r.pref ? `de ${esc(r.pref.nombre)}` : 'de cualquier marca'}</div>` : '';
+    const pDia = r => r.porDia < 10 ? r.porDia.toFixed(1).replace('.', ',') : fU(r.porDia);
     $('#pr-tb').innerHTML = filas.length ? filas.map(r => `
-      <tr data-pp="${r.p.id}" class="clk" title="Ver el detalle de ${esc(r.p.nombre)}">
-        <td><div class="pcell">${thumb(r.p)}<div style="min-width:0"><div class="pname">${esc(r.p.nombre)}</div><div class="pcode">${esc(catName(r.p.categoria_id))}</div></div></div></td>
-        <td class="n num">${stockSpan(r.p)}</td>
-        <td class="n num">${r.sinDatos ? '—' : (r.porDia < 10 ? r.porDia.toFixed(1).replace('.', ',') : fU(r.porDia))}</td>
+      <tr data-pp="${r.key}" class="clk" title="Ver el detalle de ${esc(r.nombre)}">
+        <td><div class="pcell">${thumb(r.p)}<div style="min-width:0">${nombreCell(r)}</div></div></td>
+        <td class="n num">${fNum(r.stock)}</td>
+        <td class="n num">${r.sinDatos ? '—' : pDia(r)}</td>
         <td class="n num">${r.sinDatos ? '—' : `~${fU(r.necesita)}<div class="t2">${fU(r.lo)} a ${fU(r.hi)}</div>`}</td>
         <td>${alc(r)}</td>
-        <td class="n num">${comp(r)}</td>
+        <td class="n num">${comp(r)}${deQue(r)}</td>
         <td>${est(r)}</td>
-        <td class="mob"><div class="mrow">${thumb(r.p)}<div class="grow"><div class="t1">${esc(r.p.nombre)}</div>
-          <div class="t2">Stock ${fNum(r.p.stock_actual)}${r.sinDatos ? '' : ` · ~${r.porDia < 10 ? r.porDia.toFixed(1).replace('.', ',') : fU(r.porDia)} por día`}</div>
+        <td class="mob"><div class="mrow">${thumb(r.p)}<div class="grow"><div class="t1">${esc(r.nombre)}${r.g ? ` <span class="gtag">${ic('layers', 's')}${r.ms.length} marcas</span>` : ''}</div>
+          <div class="t2">Stock ${fNum(r.stock)}${r.sinDatos ? '' : ` · ~${pDia(r)} por día`}</div>
           <div class="t3">Alcanza hasta: ${alc(r)}</div><div style="margin-top:6px">${est(r)}</div></div>
-          <div class="mr"><span class="t2">Comprar</span><span class="big">${r.pedido > 0 ? fNum(r.pedido) : '—'}</span>${r.paquetes ? `<span class="t2">${r.paquetes} × ${r.pk}</span>` : ''}</div></div></td>
+          <div class="mr"><span class="t2">Comprar</span><span class="big">${r.pedido > 0 ? fNum(r.pedido) : '—'}</span>${r.paquetes ? `<span class="t2">${r.paquetes} × ${r.pk}</span>` : ''}${r.pedido > 0 && r.g && r.pref ? `<span class="t2">${esc(r.pref.nombre)}</span>` : ''}</div></div></td>
       </tr>`).join('') : emptyRow(7, f.soloComprar ? 'No hace falta comprar nada' : 'No hay premios activos', f.soloComprar ? 'Con el stock actual alcanza para todo el período.' : '', 'circle-check');
   },
 
@@ -1698,25 +1745,29 @@ function modalFecha(e) {
   };
 }
 
-function modalPronPremio(id) {
+function modalPronPremio(key) {
   const v = VIEWS.pronostico, plan = v.plan; if (!plan) return;
-  const r = plan.filas.find(x => x.p.id === id); if (!r) return;
-  const f = S.f.pron, p = r.p, hoy = plan.hoy, pr = plan.P.get(id);
+  const r = plan.filas.find(x => x.key === key); if (!r) return;
+  const f = S.f.pron, hoy = plan.hoy, pr = plan.P.get(key);
+  const ids = new Set(r.ms.map(p => p.id));
   const regPorDia = new Map();
-  salidasVig().filter(m => m.premio_id === id).forEach(m => { const k = ymd(m.creado_en); regPorDia.set(k, (regPorDia.get(k) || 0) + qtyEf(m)); });
+  salidasVig().filter(m => ids.has(m.premio_id)).forEach(m => { const k = ymd(m.creado_en); regPorDia.set(k, (regPorDia.get(k) || 0) + qtyEf(m)); });
+  const edit = rolActual() === 'admin';
   const md = modal({
-    title: esc(p.nombre), size: 'lg',
+    title: esc(r.nombre), size: 'lg',
     body: `<div class="kpis k3" style="margin-bottom:12px">
-        <div class="kpi"><span class="kpi-l">Stock</span><span class="kpi-v">${fNum(p.stock_actual)}</span><span class="kpi-s">Mínimo ${fNum(p.stock_minimo)}</span></div>
-        <div class="kpi"><span class="kpi-l">Por día</span><span class="kpi-v">${r.sinDatos ? '—' : r.porDia.toFixed(1).replace('.', ',')}</span><span class="kpi-s">${r.t && r.t.fal ? `Incluye ${Math.round(r.t.m * 100)}% de faltantes` : 'Promedio reciente'}</span></div>
-        <div class="kpi"><span class="kpi-l">Comprar</span><span class="kpi-v">${r.pedido ? fNum(r.pedido) : '—'}</span><span class="kpi-s">${r.paquetes ? `${r.paquetes} paquete(s) de ${r.pk}` : r.sinDatos ? 'Sin retiros recientes' : `Cubre ~${fU(r.cubre || 0)} en ${f.per} días`}</span></div>
+        <div class="kpi"><span class="kpi-l">Stock${r.g ? ' del grupo' : ''}</span><span class="kpi-v">${fNum(r.stock)}</span><span class="kpi-s">Mínimo ${fNum(r.minimo)}</span></div>
+        <div class="kpi"><span class="kpi-l">Por día</span><span class="kpi-v">${r.sinDatos ? '—' : r.porDia.toFixed(1).replace('.', ',')}</span><span class="kpi-s">${r.t && r.t.fal ? `Incluye ${Math.round(r.t.m * 100)}% de faltantes` : r.g ? 'Todas las marcas juntas' : 'Promedio reciente'}</span></div>
+        <div class="kpi"><span class="kpi-l">Comprar</span><span class="kpi-v">${r.pedido ? fNum(r.pedido) : '—'}</span><span class="kpi-s">${r.pedido && r.g ? (r.pref ? `De ${esc(r.pref.nombre)}` : 'De cualquier marca') : ''}${r.paquetes ? `${r.pedido && r.g ? ' · ' : ''}${r.paquetes} paquete(s) de ${r.pk}` : r.sinDatos ? 'Sin retiros recientes' : r.pedido && r.g ? '' : `Cubre ~${fU(r.cubre || 0)} en ${f.per} días`}</span></div>
       </div>
-      <div class="chart-box" style="height:240px;padding:0"><canvas id="pp-ch" aria-label="Consumo de ${esc(p.nombre)}"></canvas></div>
-      <p class="muted" style="margin:10px 0 0">${r.sinDatos ? 'Sin retiros en las últimas 12 semanas.' : !r.agota ? 'Con el consumo actual alcanza por más de 4 meses.' : r.agota <= hoy ? 'Está agotado.' : `Al ritmo actual se acaba el <b>${fechaCorta(r.agota)}</b>.`}
-      ${Number(p.unidades_por_paquete) > 1 ? '' : ' Si viene en cajas o bolsas, carga cuántas unidades trae cada una en "Editar premio" y el pedido se redondea solo.'}</p>`,
-    foot: `${rolActual() === 'admin' ? '<button class="btn" id="pp-ed">Editar premio</button>' : ''}<span class="sp"></span><button class="btn pri" data-close>Listo</button>`
+      ${r.g ? `<ul class="list" style="margin:0 0 12px">${r.ms.map(p => `<li>${thumb(p)}<div class="grow"><div class="t1">${esc(p.nombre)}${r.pref && r.pref.id === p.id ? ' <span class="badge ok">Se compra esta</span>' : ''}</div><div class="t2">${p.stock_actual > 0 ? `${fNum(p.stock_actual)} en stock` : 'Sin stock de esta marca'}</div></div></li>`).join('')}</ul>` : ''}
+      <div class="chart-box" style="height:240px;padding:0"><canvas id="pp-ch" aria-label="Consumo de ${esc(r.nombre)}"></canvas></div>
+      <p class="muted" style="margin:10px 0 0">${r.sinDatos ? 'Sin retiros en las últimas 12 semanas.' : !r.agota ? 'Con el consumo actual alcanza por más de 4 meses.' : r.agota <= hoy ? (r.g ? 'No queda ninguna marca.' : 'Está agotado.') : `Al ritmo actual ${r.g ? 'el grupo' : ''} se acaba el <b>${fechaCorta(r.agota)}</b>.`}
+      ${r.g && !r.pref ? ' Elige en "Grupos de marcas" cuál conviene comprar.' : ''}
+      ${!r.g && !(Number(r.p.unidades_por_paquete) > 1) ? ' Si viene en cajas o bolsas, carga cuántas unidades trae cada una en "Editar premio" y el pedido se redondea solo.' : ''}</p>`,
+    foot: `${edit ? (r.g ? '<button class="btn" id="pp-ed">Editar grupo</button>' : '<button class="btn" id="pp-ed">Editar premio</button>') : ''}<span class="sp"></span><button class="btn pri" data-close>Listo</button>`
   });
-  const ed = md.$('#pp-ed'); if (ed) ed.onclick = () => { md.close(); modalPremio(p); };
+  const ed = md.$('#pp-ed'); if (ed) ed.onclick = () => { md.close(); r.g ? modalGrupo(r.g) : modalPremio(r.p); };
   const c = chartColors(), L = [], A = [], F = [];
   for (let i = -20; i < f.per; i++) {
     const d = addDias(hoy, i);
@@ -1797,8 +1848,9 @@ VIEWS.dashboard = {
     if (!$('#d-kpis')) return;
     const admin = isAdmin();
     const act = S.premios.filter(p => p.activo);
-    const bajo = act.filter(p => estadoDe(p) === 'bajo');
-    const agot = act.filter(p => estadoDe(p) === 'agotado');
+    const uds = unidadesStock();
+    const bajo = uds.filter(u => u.estado === 'bajo');
+    const agot = uds.filter(u => u.estado === 'agotado');
     const hoy = ymd(new Date()), mes = hoy.slice(0, 7);
     const sal = salidasVig();
     const sHoy = sum(sal.filter(m => ymd(m.creado_en) === hoy), qtyEf);
@@ -1818,9 +1870,9 @@ VIEWS.dashboard = {
       <div class="kpi"><span class="kpi-l">${ic('calendar', 's')}Retirados este mes</span><span class="kpi-v">${fNum(sMes + fMes)}</span><span class="kpi-s">${detalle(sMes, fMes)}</span></div>`;
 
     // alertas de stock (estado actual)
-    const alertas = [...agot, ...bajo.sort((a, b) => a.stock_actual - b.stock_actual)];
-    $('#d-alertas').innerHTML = alertas.length ? alertas.slice(0, 8).map(p => `
-      <li>${thumb(p)}<div class="grow"><div class="t1">${esc(p.nombre)}</div><div class="t2">${estadoDe(p) === 'agotado' ? 'No quedan unidades' : `Quedan ${fNum(p.stock_actual)} · mínimo ${fNum(p.stock_minimo)}`}</div></div>${badgeEstado(p)}</li>`).join('')
+    const alertas = [...agot, ...bajo.sort((a, b) => a.stock - b.stock)];
+    $('#d-alertas').innerHTML = alertas.length ? alertas.slice(0, 8).map(u => `
+      <li>${thumb(u.p)}<div class="grow"><div class="t1">${esc(u.nombre)}${u.g ? ` <span class="muted small">(${u.n} marca${u.n === 1 ? '' : 's'})</span>` : ''}</div><div class="t2">${u.estado === 'agotado' ? (u.g ? 'No queda ninguna marca' : 'No quedan unidades') : `Quedan ${fNum(u.stock)}${u.g ? ' entre todas las marcas' : ''} · mínimo ${fNum(u.minimo)}`}</div></div><span class="badge ${ESTADOS[u.estado].c}"><span class="d"></span>${ESTADOS[u.estado].t}</span></li>`).join('')
       + (alertas.length > 8 ? `<li class="muted small">Y ${alertas.length - 8} más.</li>` : '')
       : `<li><div class="empty" style="width:100%">${ic('circle-check')}<b>Todo el stock está en orden</b>Ningún premio activo está en el mínimo.</div></li>`;
 
@@ -1892,6 +1944,7 @@ VIEWS.stock = {
       <div class="page-head">
         <p>Stock actual de cada premio. Los números cambian solos cuando alguien registra un movimiento.</p>
         <span class="sp"></span>
+        ${admin && !S.gruposErr ? `<button class="btn" id="s-grp">${ic('layers')}Grupos de marcas</button>` : ''}
         ${admin ? `<button class="btn pri" id="s-new">${ic('plus')}Nuevo premio</button>` : ''}
       </div>
       <div class="panel">
@@ -1930,6 +1983,7 @@ VIEWS.stock = {
     $('#s-est').onclick = e => { const b = e.target.closest('[data-est]'); if (!b) return; f.est = b.dataset.est; this.paint(); icons(); };
     if ($('#s-inact')) $('#s-inact').onchange = e => { f.inact = e.target.checked; this.paint(); icons(); };
     if ($('#s-new')) $('#s-new').onclick = () => modalPremio();
+    if ($('#s-grp')) $('#s-grp').onclick = () => modalGrupos();
     $('#s-tb').onclick = e => {
       const b = e.target.closest('[data-act]'); if (!b) return;
       const id = +b.dataset.id, p = premio(id);
@@ -1962,7 +2016,8 @@ VIEWS.stock = {
     let rows = S.premios.filter(p => (f.inact && admin) || p.activo);
     if (q) rows = rows.filter(p => norm(`${p.nombre} ${p.codigo} ${p.descripcion || ''}`).includes(q));
     if (f.cat) rows = rows.filter(p => String(p.categoria_id) === f.cat);
-    if (f.est === 'alerta') rows = rows.filter(p => estadoDe(p) !== 'ok');
+    if (f.est === 'alerta') rows = rows.filter(enAlerta);
+    else if (f.est === 'ok') rows = rows.filter(p => ['ok', 'marca'].includes(estadoDe(p)));
     else if (f.est) rows = rows.filter(p => estadoDe(p) === f.est);
     const sorters = {
       nombre: byName,
@@ -1985,19 +2040,121 @@ VIEWS.stock = {
             <button class="btn" data-act="mas" data-id="${p.id}" title="Más opciones" aria-label="Más opciones" aria-haspopup="menu">${ic('ellipsis-vertical', 's')}</button>` : ''}`;
       return `
       <tr class="${p.activo ? '' : 'void'}">
-        <td class="main-cell" data-label="Premio"><div class="pcell">${thumb(p)}<div style="min-width:0"><div class="pname">${esc(p.nombre)}</div><div class="pcode">${esc(p.codigo)}</div></div></div></td>
+        <td class="main-cell" data-label="Premio"><div class="pcell">${thumb(p)}<div style="min-width:0"><div class="pname">${esc(p.nombre)}</div><div class="pcode">${esc(p.codigo)}${grupoTag(p) ? ` · ${grupoTag(p)}` : ''}</div></div></div></td>
         <td data-label="Categoría">${esc(catName(p.categoria_id))}</td>
         <td data-label="Stock actual" class="n">${lvl(p)}</td>
-        <td data-label="Stock mínimo" class="n num">${fNum(p.stock_minimo)}</td>
+        <td data-label="Stock mínimo" class="n num">${grupoDe(p) ? `${fNum(grupoDe(p).stock_minimo || 0)}<div class="muted small">del grupo</div>` : fNum(p.stock_minimo)}</td>
         <td data-label="Estado">${badgeEstado(p)}</td>
         <td data-label="Último movimiento"><span class="muted">${p.ultimo_movimiento_en ? rel(p.ultimo_movimiento_en) : 'Sin movimientos'}</span></td>
         <td data-label="" class="n"><div class="acts">${acts}</div></td>
-        <td class="mob"><div class="mrow">${thumb(p)}<div class="grow"><div class="t1">${esc(p.nombre)}</div><div class="t2">${esc(catName(p.categoria_id))}</div><div style="margin-top:6px">${badgeEstado(p)}</div></div>
-          <div class="mr"><span class="big">${stockSpan(p)}</span><span class="t2">mínimo ${fNum(p.stock_minimo)}</span></div></div>
+        <td class="mob"><div class="mrow">${thumb(p)}<div class="grow"><div class="t1">${esc(p.nombre)}</div><div class="t2">${esc(catName(p.categoria_id))}</div>${grupoTag(p) ? `<div class="t2">${grupoTag(p)}</div>` : ''}<div style="margin-top:6px">${badgeEstado(p)}</div></div>
+          <div class="mr"><span class="big">${stockSpan(p)}</span><span class="t2">${grupoDe(p) ? `mínimo ${fNum(grupoDe(p).stock_minimo || 0)} del grupo` : `mínimo ${fNum(p.stock_minimo)}`}</span></div></div>
           ${acts.trim() ? `<div class="acts" style="margin-top:6px">${acts}</div>` : ''}</td>
       </tr>`; }).join('');
   }
 };
+
+/* =============================================================
+   GRUPOS DE MARCAS QUE SE REEMPLAZAN
+   ============================================================= */
+function modalGrupos() {
+  const lista = () => {
+    const gs = (S.grupos || []).slice().sort(byName);
+    return gs.length ? `<ul class="list grp-list">${gs.map(g => {
+      const ms = miembrosDe(g), pref = ms.find(x => x.id === g.preferido_id), e = estadoGrupo(g);
+      return `<li><span class="grp-ic">${ic('layers', 's')}</span><div class="grow"><div class="t1">${esc(g.nombre)} <span class="badge ${ESTADOS[e].c}"><span class="d"></span>${fNum(stockGrupo(g))} en total</span></div>
+        <div class="t2">${ms.length ? ms.map(p => `${esc(p.nombre)} (${fNum(p.stock_actual)})`).join(' · ') : 'Sin marcas todavía'}</div>
+        <div class="t3">Mínimo del grupo: ${fNum(g.stock_minimo || 0)}${pref ? ` · Se compra: <b>${esc(pref.nombre)}</b>` : ''}</div></div>
+        <button class="btn sm" data-g="${g.id}">${ic('pencil', 's')}Editar</button></li>`;
+    }).join('')}</ul>` : `<div class="empty">${ic('layers')}<b>Todavía no hay grupos</b>Crea uno para cada producto que tenga varias marcas, por ejemplo "Turrones" o "Alfajores".</div>`;
+  };
+  const m = modal({
+    title: 'Grupos de marcas', size: 'lg',
+    body: `<p class="muted" style="margin:0 0 12px">Junta las marcas que se reemplazan entre sí. La app controla el <b>total del grupo</b>: si falta una marca pero hay otra, no avisa. El pronóstico calcula el grupo completo y sugiere comprar la marca que elijas (la más barata).</p><div id="grp-box">${lista()}</div>`,
+    foot: `<button class="btn" data-close>Cerrar</button><span class="sp"></span><button class="btn pri" id="grp-new">${ic('plus', 's')}Nuevo grupo</button>`
+  });
+  const refrescar = () => { const b = m.$('#grp-box'); if (b) { b.innerHTML = lista(); icons(); } };
+  m.$('#grp-new').onclick = () => modalGrupo(null, refrescar);
+  m.$('#grp-box').onclick = e => { const b = e.target.closest('[data-g]'); if (b) modalGrupo((S.grupos || []).find(g => g.id === +b.dataset.g), refrescar); };
+}
+
+function modalGrupo(g, alGuardar) {
+  const nuevo = !g;
+  const sel = new Set(g ? miembrosDe(g).map(p => p.id) : []);
+  let pref = g ? g.preferido_id : null;
+  const act = S.premios.filter(p => p.activo).sort(byName);
+  const fila = p => {
+    const otro = p.grupo_id && (!g || p.grupo_id !== g.id) ? grupoDe(p) : null;
+    return `<label class="grp-m ${sel.has(p.id) ? 'on' : ''}" data-pid="${p.id}">
+      <input type="checkbox" value="${p.id}" ${sel.has(p.id) ? 'checked' : ''}>
+      ${thumb(p)}<span class="grow"><span class="t1">${esc(p.nombre)}</span><span class="t2">Stock ${fNum(p.stock_actual)}${otro ? ` · ahora en ${esc(otro.nombre)}` : ''}</span></span>
+      ${sel.has(p.id) ? `<button type="button" class="btn sm pref ${pref === p.id ? 'on' : ''}" data-pref="${p.id}" title="Esta es la que conviene comprar">${ic(pref === p.id ? 'badge-check' : 'shopping-cart', 's')}${pref === p.id ? 'Se compra esta' : 'Comprar esta'}</button>` : ''}
+    </label>`;
+  };
+  const m = modal({
+    title: nuevo ? 'Nuevo grupo de marcas' : `Editar grupo: ${esc(g.nombre)}`, size: 'lg',
+    body: `<form id="gf" class="stack">
+      <div class="form-err" id="ge"></div>
+      <div class="grid2">
+        <div class="field"><label for="gn">Nombre del grupo</label><input class="in" id="gn" maxlength="60" placeholder="Ej.: Turrones" value="${g ? esc(g.nombre) : ''}" required></div>
+        <div class="field"><label for="gmin">Mínimo del grupo</label><input class="in num" id="gmin" type="number" min="0" step="1" value="${g ? g.stock_minimo || 0 : 0}"><span class="hint">Avisa cuando el total de todas las marcas llega a este número.</span></div>
+      </div>
+      <div class="field"><label>Marcas del grupo</label>
+        <div class="in-ic" style="margin-bottom:8px">${ic('search')}<input class="in" id="gq" placeholder="Buscar premio"></div>
+        <div class="grp-ms" id="gms">${act.map(fila).join('')}</div>
+        <span class="hint" id="gsum"></span></div>
+    </form>`,
+    foot: `${nuevo ? '' : '<button class="btn danger" type="button" id="gdel">Eliminar grupo</button><span class="sp"></span>'}<button class="btn" data-close>Cancelar</button><button class="btn pri" id="gok">${nuevo ? 'Crear grupo' : 'Guardar'}</button>`
+  });
+  const resumen = () => {
+    const ms = act.filter(p => sel.has(p.id));
+    m.$('#gsum').innerHTML = ms.length ? `${ms.length} marca(s) · ${fNum(sum(ms, p => Math.max(0, p.stock_actual)))} unidades en total${pref && sel.has(pref) ? ` · se compra ${esc((premio(pref) || {}).nombre || '')}` : ' · elige con "Comprar esta" la que conviene'}` : 'Marca las que se reemplazan entre sí.';
+  };
+  const repintar = () => { m.$('#gms').innerHTML = act.filter(p => !m.$('#gq').value || norm(p.nombre).includes(norm(m.$('#gq').value))).map(fila).join(''); icons(); resumen(); };
+  m.$('#gq').oninput = repintar;
+  m.$('#gms').onclick = e => {
+    const b = e.target.closest('[data-pref]');
+    if (b) { e.preventDefault(); pref = +b.dataset.pref; repintar(); return; }
+  };
+  m.$('#gms').onchange = e => {
+    const cb = e.target.closest('input[type=checkbox]'); if (!cb) return;
+    const id = +cb.value; if (cb.checked) sel.add(id); else { sel.delete(id); if (pref === id) pref = null; }
+    if (!pref && sel.size === 1) pref = id;
+    showErr(m.$('#ge'), ''); repintar();
+  };
+  resumen();
+  const guardar = async () => {
+    const nombre = m.$('#gn').value.trim(), min = parseInt(m.$('#gmin').value, 10);
+    if (!nombre) return showErr(m.$('#ge'), 'Ponle un nombre al grupo.');
+    if (isNaN(min) || min < 0) return showErr(m.$('#ge'), 'El mínimo debe ser 0 o mayor.');
+    if (sel.size < 2) return showErr(m.$('#ge'), 'Un grupo necesita al menos 2 marcas.');
+    if ((S.grupos || []).some(x => (!g || x.id !== g.id) && norm(x.nombre) === norm(nombre))) return showErr(m.$('#ge'), 'Ya existe un grupo con ese nombre.');
+    const enOtro = act.filter(p => sel.has(p.id) && p.grupo_id && (!g || p.grupo_id !== g.id));
+    if (enOtro.length && !await confirmar({ title: 'Mover marcas de grupo', body: `<p>${enOtro.map(p => `<b>${esc(p.nombre)}</b> está en ${esc(grupoDe(p).nombre)}`).join('<br>')}.</p><p>Se pasan a <b>${esc(nombre)}</b>.</p>`, ok: 'Mover' })) return;
+    await busy(m.$('#gok'), async () => {
+      try {
+        const datos = { nombre, stock_minimo: min, preferido_id: pref && sel.has(pref) ? pref : null };
+        const row = nuevo ? await API.crearGrupo(datos) : await API.editarGrupo(g.id, datos);
+        S.grupos = (S.grupos || []).filter(x => x.id !== row.id).concat(row);
+        const cambios = S.premios.filter(p => (sel.has(p.id) && p.grupo_id !== row.id) || (!sel.has(p.id) && p.grupo_id === row.id));
+        for (const p of cambios) upsertPremioLocal(await API.editarPremio(p.id, { grupo_id: sel.has(p.id) ? row.id : null }));
+        m.close(); toast(nuevo ? `Grupo "${esc(nombre)}" creado.` : 'Grupo actualizado.', 'ok', 2800);
+        updateNavBadge(); paintCurrent(); if (alGuardar) alGuardar();
+      } catch (er) { showErr(m.$('#ge'), /duplicate|unique/i.test(errMsg(er)) ? 'Ya existe un grupo con ese nombre.' : errMsg(er)); }
+    });
+  };
+  m.$('#gok').onclick = guardar;
+  m.$('#gf').onsubmit = ev => { ev.preventDefault(); guardar(); };
+  if (!nuevo) m.$('#gdel').onclick = async () => {
+    m.close();
+    if (!await confirmar({ title: 'Eliminar grupo', body: `<p>Se elimina el grupo <b>${esc(g.nombre)}</b>. Las marcas no se borran: vuelven a controlarse cada una por su cuenta, con su propio mínimo.</p>`, ok: 'Eliminar', danger: true })) return;
+    try {
+      for (const p of miembrosDe(g)) upsertPremioLocal(await API.editarPremio(p.id, { grupo_id: null }));
+      await API.borrarGrupo(g.id); S.grupos = S.grupos.filter(x => x.id !== g.id);
+      toast('Grupo eliminado.', 'ok', 2500); updateNavBadge(); paintCurrent(); if (alGuardar) alGuardar();
+    } catch (er) { toast('No se pudo eliminar: ' + esc(errMsg(er)), 'bad'); }
+  };
+}
 
 function upsertPremioLocal(row) {
   const i = S.premios.findIndex(p => p.id === row.id);
@@ -2050,9 +2207,10 @@ function modalPremio(p) {
         <div class="field"><label for="pd">Descripción</label><textarea class="in" id="pd" rows="2" placeholder="Modelo, color, talle u otros detalles">${esc(p ? p.descripcion : '')}</textarea></div>
         <div class="${nuevo ? 'grid3' : 'grid2'}">
           <div class="field"><label for="pcat">Categoría</label><select class="in" id="pcat"><option value="">Sin categoría</option>${optCats(p ? p.categoria_id : '')}</select></div>
-          <div class="field"><label for="pmin">Stock mínimo</label><input class="in num" id="pmin" type="number" min="0" step="1" value="${p ? p.stock_minimo : 5}"><span class="hint">Avisa cuando el stock llega a este número.</span></div>
+          <div class="field"><label for="pmin">Stock mínimo</label><input class="in num" id="pmin" type="number" min="0" step="1" value="${p ? p.stock_minimo : 5}"><span class="hint">${grupoDe(p) ? `Está en el grupo ${esc(grupoDe(p).nombre)}: se usa el mínimo del grupo.` : 'Avisa cuando el stock llega a este número.'}</span></div>
           ${nuevo ? `<div class="field"><label for="pini">Stock inicial</label><input class="in num" id="pini" type="number" min="0" step="1" value="0"><span class="hint">Se registra como ingreso.</span></div>` : ''}
         </div>
+        ${!S.gruposErr ? `<div class="field"><label for="pgrp">Grupo de marcas</label><select class="in" id="pgrp"><option value="">Ninguno (se controla solo)</option>${(S.grupos || []).map(g => `<option value="${g.id}" ${p && p.grupo_id === g.id ? 'selected' : ''}>${esc(g.nombre)}</option>`).join('')}</select><span class="hint">Si es una marca de algo que se reemplaza (por ejemplo, un turrón), elige el grupo: se controla el total y no avisa si falta solo esta marca. Los grupos se crean desde Stock › Grupos de marcas.</span></div>` : ''}
         ${!S.especialesErr ? `<div class="field"><label for="ppaq">Viene en cajas o bolsas de</label><input class="in num" id="ppaq" type="number" min="1" step="1" placeholder="Opcional" value="${p && p.unidades_por_paquete ? p.unidades_por_paquete : ''}"><span class="hint">Unidades por caja, bolsa o paquete. El pedido sugerido se redondea a paquetes completos.</span></div>` : ''}
         ${!nuevo ? `<div class="callout info">${ic('info', 's')}<span>El stock no se edita aquí. Usa <b>Registrar Movimiento</b> (ingreso o ajuste) para que quede en el historial.</span></div>` : ''}
       </form>`,
@@ -2082,6 +2240,7 @@ function modalPremio(p) {
       else if (quitar) imagen_url = null;
       const datos = { nombre, codigo, descripcion: m.$('#pd').value.trim() || null, categoria_id: m.$('#pcat').value ? +m.$('#pcat').value : null, stock_minimo: min, imagen_url };
       if (paqIn) datos.unidades_por_paquete = paq;
+      const grpIn = m.$('#pgrp'); if (grpIn) datos.grupo_id = grpIn.value ? +grpIn.value : null;
       let row;
       if (nuevo) {
         row = await API.crearPremio({ ...datos, creado_por: S.perfil.id });
@@ -3612,9 +3771,9 @@ async function borrarUsuario(u) {
 /* =============================================================
    VISTA: AUDITORÍA
    ============================================================= */
-const TABLAS_AUD = { premios: 'Premios', movimientos: 'Movimientos', perfiles: 'Usuarios', categorias: 'Categorías', configuracion: 'Configuración', sectores: 'Sectores', integrantes: 'Equipo', fechas_especiales: 'Fechas especiales' };
+const TABLAS_AUD = { premios: 'Premios', movimientos: 'Movimientos', perfiles: 'Usuarios', categorias: 'Categorías', configuracion: 'Configuración', sectores: 'Sectores', integrantes: 'Equipo', fechas_especiales: 'Fechas especiales', grupos_premio: 'Grupos de marcas' };
 const CAMPOS = {
-  nombre: 'Nombre', codigo: 'Código', descripcion: 'Descripción', categoria_id: 'Categoría', imagen_url: 'Imagen', stock_minimo: 'Stock mínimo', unidades_por_paquete: 'Unidades por paquete', fecha: 'Fecha', factor: 'Efecto',
+  nombre: 'Nombre', codigo: 'Código', descripcion: 'Descripción', categoria_id: 'Categoría', imagen_url: 'Imagen', stock_minimo: 'Stock mínimo', unidades_por_paquete: 'Unidades por paquete', grupo_id: 'Grupo de marcas', preferido_id: 'Marca que se compra', fecha: 'Fecha', factor: 'Efecto',
   activo: 'Activo', usuario: 'Usuario', sector_ids: 'Sectores', sector_nombre: 'Sector', grupo: 'Grupo', orden: 'Orden', nombre_completo: 'Nombre completo', rol: 'Rol', valor: 'Valor', clave: 'Clave',
   estado: 'Estado', cantidad: 'Cantidad', cantidad_corregida: 'Cantidad corregida', motivo_modificacion: 'Motivo', modificado_por_nombre: 'Modificado por',
   stock_actual: 'Stock actual', premio_nombre: 'Premio', tipo: 'Tipo', delta: 'Efecto en stock', observacion: 'Observación', usuario_nombre: 'Registrado por',
@@ -3977,7 +4136,7 @@ function startRealtime() {
       } else if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(st)) { S.wasOff = true; setLive('off'); }
     },
     change: onChange,
-    extra: S.especialesErr ? [] : ['fechas_especiales']
+    extra: [...(S.especialesErr ? [] : ['fechas_especiales']), ...(S.gruposErr ? [] : ['grupos_premio'])]
   });
 }
 function onChange(table, p) {
@@ -4001,6 +4160,8 @@ function onChange(table, p) {
     API.sectores().then(x => { S.sectores = x; paintCurrent(); }).catch(() => {});
   } else if (table === 'categorias') {
     API.categorias().then(c => { S.categorias = c; paintCurrent(); }).catch(() => {});
+  } else if (table === 'grupos_premio') {
+    API.grupos().then(x => { S.grupos = x; updateNavBadge(); paintCurrent(); }).catch(() => {});
   } else if (table === 'fechas_especiales') {
     API.fechasEspeciales().then(x => { S.especiales = x; paintCurrent(); }).catch(() => {});
   } else if (table === 'configuracion' && n && n.clave) {

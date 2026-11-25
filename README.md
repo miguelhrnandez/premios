@@ -20,6 +20,7 @@ supabase/migracion_05_integrantes.sql       Personas de cada equipo y "¿Quién 
 supabase/migracion_06_jefes_y_equipos.sql   Jefes en "¿Quién eres?" y carga inicial de los equipos (después de la 05)
 supabase/migracion_07_jefes_cargan_stock.sql  Los jefes cargan stock y retiran para su equipo (después de la 06)
 supabase/migracion_08_pronostico.sql        Pronóstico y compras: fechas especiales, temporadas y cajas por premio (después de la 07)
+supabase/migracion_09_grupos.sql            Grupos de marcas que se reemplazan, alertas por total del grupo (después de la 08)
 ```
 
 ---
@@ -45,9 +46,9 @@ Esto crea todas las tablas, las reglas de seguridad, el tiempo real y el espacio
 6. Y con `supabase/migracion_04_retiro_sin_login.sql` (link de retiros del equipo).
 7. Y con `supabase/migracion_05_integrantes.sql` (personas de cada equipo).
 
-Después, en el mismo orden, `migracion_06_jefes_y_equipos.sql`, `migracion_07_jefes_cargan_stock.sql` y `migracion_08_pronostico.sql`.
+Después, en el mismo orden, `migracion_06_jefes_y_equipos.sql`, `migracion_07_jefes_cargan_stock.sql`, `migracion_08_pronostico.sql` y `migracion_09_grupos.sql`.
 
-Orden siempre: `schema.sql` → `02` → `03` → `04` → `05` → `06` → `07` → `08`.
+Orden siempre: `schema.sql` → `02` → `03` → `04` → `05` → `06` → `07` → `08` → `09`.
 
 ### 3. Configurar el inicio de sesión
 
@@ -158,6 +159,14 @@ La base genera alertas, que llegan al instante a los usuarios conectados (campan
 ### Tiempo real
 
 El indicador **En vivo** de la barra superior muestra que la conexión está activa. Cuando alguien registra un movimiento, el stock cambia en todas las pantallas abiertas y el número destella con la diferencia (por ejemplo, −3). Si se corta internet, la app se reconecta y vuelve a cargar los datos sola.
+
+### Grupos de marcas que se reemplazan
+
+Para productos con varias marcas (por ejemplo, turrones o alfajores), lo que importa es el total, no cada marca. Desde **Stock › Grupos de marcas** se crea un grupo, se eligen sus marcas, el **mínimo del grupo** y la marca que **se compra** (la que conviene por precio).
+
+- Si una marca llega a 0 pero quedan otras, aparece como "Sin esta marca" (en gris) y no genera alerta.
+- El aviso de "Stock bajo" o "Sin stock" se da por el total del grupo contra su mínimo, una sola vez por grupo.
+- El pronóstico suma el consumo de todas las marcas, solo cuenta un día como "sin stock" cuando no quedaba ninguna, y sugiere comprar la marca elegida.
 
 ### Pronóstico y compras (solo administrador)
 
