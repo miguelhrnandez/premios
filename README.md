@@ -19,6 +19,7 @@ supabase/migracion_04_retiro_sin_login.sql  Link de retiros del equipo, sin usua
 supabase/migracion_05_integrantes.sql       Personas de cada equipo y "¿Quién eres?" obligatorio (después de la 04)
 supabase/migracion_06_jefes_y_equipos.sql   Jefes en "¿Quién eres?" y carga inicial de los equipos (después de la 05)
 supabase/migracion_07_jefes_cargan_stock.sql  Los jefes cargan stock y retiran para su equipo (después de la 06)
+supabase/migracion_08_pronostico.sql        Pronóstico y compras: fechas especiales, temporadas y cajas por premio (después de la 07)
 ```
 
 ---
@@ -44,9 +45,9 @@ Esto crea todas las tablas, las reglas de seguridad, el tiempo real y el espacio
 6. Y con `supabase/migracion_04_retiro_sin_login.sql` (link de retiros del equipo).
 7. Y con `supabase/migracion_05_integrantes.sql` (personas de cada equipo).
 
-Después, en el mismo orden, `migracion_06_jefes_y_equipos.sql` y `migracion_07_jefes_cargan_stock.sql`.
+Después, en el mismo orden, `migracion_06_jefes_y_equipos.sql`, `migracion_07_jefes_cargan_stock.sql` y `migracion_08_pronostico.sql`.
 
-Orden siempre: `schema.sql` → `02` → `03` → `04` → `05` → `06` → `07`.
+Orden siempre: `schema.sql` → `02` → `03` → `04` → `05` → `06` → `07` → `08`.
 
 ### 3. Configurar el inicio de sesión
 
@@ -157,6 +158,19 @@ La base genera alertas, que llegan al instante a los usuarios conectados (campan
 ### Tiempo real
 
 El indicador **En vivo** de la barra superior muestra que la conexión está activa. Cuando alguien registra un movimiento, el stock cambia en todas las pantallas abiertas y el número destella con la diferencia (por ejemplo, −3). Si se corta internet, la app se reconecta y vuelve a cargar los datos sola.
+
+### Pronóstico y compras (solo administrador)
+
+Aprende de cada retiro y calcula cuánto vas a necesitar:
+
+- **Consumo base por premio**: promedio de las últimas 12 semanas, donde lo reciente pesa más. Los días en que el premio estuvo sin stock no se cuentan (ese día se retiró poco porque no había, no porque se pidiera menos).
+- **Día de la semana**: detecta cuánto más o menos se retira cada día respecto de un día promedio.
+- **Tendencia**: si el consumo viene subiendo o bajando de forma clara, lo proyecta (con tope de ±25 %).
+- **Faltantes de inventario**: se suman como un % extra por premio.
+- **Fechas especiales y temporadas**: cierres (1/1, 1/5, 25/12, Día del Empleado de Comercio) cuentan como 0; los feriados en que se abre y las temporadas (vacaciones de verano e invierno, vuelta a clases, fiestas) se aprenden solos comparando con las semanas anteriores y, desde el año siguiente, con la misma temporada del año pasado. También se les puede poner un % a mano.
+- **Ritmo de hoy**: aprende a qué hora se retira cada parte del día; si hoy viene más movido, lo avisa y lo suma al cálculo.
+- **Pedido sugerido**: cubre el período elegido (7, 14 o 30 días) con el margen de seguridad elegido (Normal 90 %, Alto 95 % o Máximo 99 % de los escenarios) y deja al menos el stock mínimo. Si el premio tiene cargadas las unidades por caja, el pedido se redondea a cajas completas.
+- **Precisión**: compara lo que habría pronosticado la semana pasada con lo que realmente se retiró.
 
 ### Exportaciones
 

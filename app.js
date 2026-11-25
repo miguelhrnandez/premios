@@ -69,6 +69,7 @@ const NAV = [
   { id: 'historial',     t: 'Historial',            i: 'history',          roles: ['admin'] },
   { id: 'inventario',    t: 'Inventario',           i: 'clipboard-check',  roles: ['admin'] },
   { id: 'reportes',      t: 'Reportes',             i: 'chart-column',     roles: ['admin'] },
+  { id: 'pronostico',    t: 'Pronóstico y compras', i: 'sparkles',         roles: ['admin'] },
   { id: 'usuarios',      t: 'Usuarios',             i: 'users',            roles: ['admin'] },
   { id: 'auditoria',     t: 'Auditoría',            i: 'shield-check',     roles: ['admin'] },
   { sep: 'Cuenta' },
@@ -99,6 +100,7 @@ const rolActual = () => (S.perfil ? S.perfil.rol : '');
 const isAdmin = () => rolActual() === 'admin';
 const isJefe = () => rolActual() === 'supervisor';
 const puedeRetirar = () => ['admin', 'usuario', 'supervisor'].includes(rolActual());
+const PRON_DEF = { per: 7, entrega: 3, margen: 'alto', gr: 'dia', soloComprar: false, todas: false };
 function defaultsF() {
   const hoy = ymd(new Date());
   return {
@@ -110,7 +112,8 @@ function defaultsF() {
     aud:   { q: '', tabla: '', desde: '', hasta: '' },
     perf:  { q: '', tipo: '', page: 0 },
     cons:  { sector: '', per: 'hoy', n: 30 },
-    inv:   { q: '', cat: '' }
+    inv:   { q: '', cat: '' },
+    pron:  { ...PRON_DEF }
   };
 }
 S.f = defaultsF();
@@ -237,6 +240,10 @@ function createAPI(sb) {
     async inventarioDetalle(id) { return T(await sb.from('inventario_detalle').select('*').eq('inventario_id', id).order('premio_nombre')); },
     async auditoria() { return T(await sb.from('auditoria').select('*').order('id', { ascending: false }).limit(2000)); },
     async rpc(fn, args) { return T(await sb.rpc(fn, args)); },
+    async fechasEspeciales() { return T(await sb.from('fechas_especiales').select('*').order('fecha')); },
+    async crearFecha(d) { return T(await sb.from('fechas_especiales').insert(d).select().single()); },
+    async editarFecha(id, d) { return T(await sb.from('fechas_especiales').update(d).eq('id', id).select().single()); },
+    async borrarFecha(id) { T(await sb.from('fechas_especiales').delete().eq('id', id)); },
     async crearPremio(d) { return T(await sb.from('premios').insert(d).select().single()); },
     async editarPremio(id, d) { return T(await sb.from('premios').update(d).eq('id', id).select().single()); },
     async eliminarPremio(id) { T(await sb.from('premios').delete().eq('id', id)); },
@@ -262,7 +269,7 @@ function createAPI(sb) {
     async cambiarMiPassword(p) { T(await sb.auth.updateUser({ password: p })); },
     subscribe(h) {
       const ch = sb.channel('stock-premios-rt');
-      ['premios', 'movimientos', 'alertas', 'categorias', 'configuracion', 'sectores', 'integrantes'].forEach(t =>
+      ['premios', 'movimientos', 'alertas', 'categorias', 'configuracion', 'sectores', 'integrantes', ...(h.extra || [])].forEach(t =>
         ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, p => h.change(t, p)));
       ch.subscribe(st => h.status(st));
       return () => { try { sb.removeChannel(ch); } catch (e) { /* ignorar */ } };
@@ -323,6 +330,9 @@ async function loadAll() {
     API.integrantes ? API.integrantes().catch(() => []) : Promise.resolve([])
   ]);
   Object.assign(S, { premios, categorias, perfiles, config, movs, alertas, sectores, integrantes, lastSync: Date.now() });
+  // Fechas especiales (migración 08): si la tabla todavía no existe, la app sigue funcionando
+  S.especialesErr = false;
+  try { S.especiales = API.fechasEspeciales ? await API.fechasEspeciales() : []; } catch (e) { S.especiales = []; S.especialesErr = true; }
   const me = perfiles.find(p => p.id === S.perfil.id);
   if (me) S.perfil = me;
 }
@@ -856,7 +866,7 @@ function chartColors() {
   return { s1: g('--series-1'), s2: g('--series-2'), s3: g('--series-3'), grid: g('--line'), text: g('--muted'), ink: g('--ink-2'), tipBg: g('--surface'), tipInk: g('--ink') };
 }
 function chartOpts(c, legend) {
-  const FAM = "Onest, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+  const FAM = "Alexandria, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
   const font = { family: FAM, size: 12 };
   return {
     responsive: true, maintainAspectRatio: false, animation: { duration: 250 },
@@ -968,7 +978,7 @@ function exportar(fmt, base, title, cols, rows) {
       doc.text(pdfSafe(`${S.config.nombre_sucursal || ''}  |  Generado el ${fFH(new Date())} por ${S.perfil.nombre_completo}  |  ${rows.length} registro(s)`), 40, 58);
       doc.autoTable({
         head: [head.map(pdfSafe)], body: body.map(r => r.map(pdfSafe)), startY: 70,
-        styles: { fontSize: 8, cellPadding: 4 }, headStyles: { fillColor: [36, 83, 212] },
+        styles: { fontSize: 8, cellPadding: 4 }, headStyles: { fillColor: [229, 44, 40] },
         alternateRowStyles: { fillColor: [245, 247, 250] }, margin: { left: 40, right: 40 }
       });
       doc.save(fname + '.pdf');
@@ -1014,6 +1024,713 @@ const MOV_COLS = [
   { h: 'Estado', v: m => estadoMovTxt(m) },
   { h: 'Observación', v: m => m.observacion || '' }
 ];
+
+/* =============================================================
+   PRONÓSTICO: aprende del historial y proyecta el consumo
+   -------------------------------------------------------------
+   Modelo (explicable, sin cajas negras):
+   · Consumo base por premio: promedio ponderado de los días con datos
+     (los días recientes pesan más; vida media de 14 días), quitando antes
+     el efecto del día de la semana.
+   · Día de la semana: cuánto se retira cada día respecto de un día
+     promedio, con todos los premios juntos. Con pocos datos se acerca a 1.
+   · Tendencia: compara las últimas 2 semanas con las 2 anteriores (amortiguada).
+   · Faltantes de inventario: se suman como un % extra por premio.
+   · Fechas especiales: cerrado = 0; con factor = ese factor; feriados sin
+     factor = lo que se aprendió en feriados anteriores.
+   · Margen: rango del 80 % y pedido con 90 % de probabilidad de alcanzar.
+   ============================================================= */
+const DIA_MS = 864e5;
+const inicioDia = d => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+const addDias = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); x.setHours(0, 0, 0, 0); return x; };
+const DOW_PL = ['domingos', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábados'];
+const DOW_SG = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+const DOW_C = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+const fDiaC = d => `${DOW_C[new Date(d).getDay()]} ${new Date(d).getDate()}/${new Date(d).getMonth() + 1}`;
+const Z80 = 1.2816; // rango que se muestra: 80 % de los escenarios
+const MARGENES = {
+  normal: { z: 1.2816, t: 'Normal', s: 'Alcanza en 9 de cada 10 escenarios' },
+  alto:   { z: 1.6449, t: 'Alto', s: 'Alcanza en 19 de cada 20 escenarios (recomendado)' },
+  maximo: { z: 2.3263, t: 'Máximo', s: 'Alcanza en 99 de cada 100 escenarios' }
+};
+const esCerrado = e => !!e && (e.tipo === 'cerrado' || (e.factor != null && Number(e.factor) === 0));
+const esFeriado = e => !!e && (e.tipo === 'feriado' || e.tipo === 'no_laborable');
+
+// ---- Fechas especiales y temporadas ----
+// Una fecha especial es de un día (fecha_fin vacía) o una temporada (rango fecha → fecha_fin).
+const esRango = e => !!e && !!e.fecha_fin && e.fecha_fin > e.fecha;
+const nombreBase = s => norm(s).replace(/\d+/g, '').replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim(); // "Vacaciones de verano 2027" = "vacaciones de verano"
+function calendario(especiales) {
+  const dia = new Map(), temps = [];
+  especiales.forEach(e => { if (esRango(e)) temps.push(e); else dia.set(e.fecha, e); });
+  temps.sort((a, b) => a.fecha.localeCompare(b.fecha));
+  const temporadaDe = k => { let t = null; for (const x of temps) if (x.fecha <= k && k <= x.fecha_fin) t = x; return t; };
+  return { dia, temps, temporadaDe };
+}
+
+function modeloPronostico({ hasta = inicioDia(new Date()), movs = S.movs, especiales = S.especiales || [], ventana = 84 } = {}) {
+  const fin = inicioDia(hasta);
+  const cal = calendario(especiales), esp = cal.dia;
+  const regDia = new Map();            // 'yyyy-mm-dd' -> Map(premio_id -> unidades registradas)
+  const regTot = new Map();            // premio_id -> unidades registradas en la ventana
+  const falTot = new Map();            // premio_id -> faltantes en la ventana
+  const totAll = new Map();            // todo el historial: 'yyyy-mm-dd' -> unidades (para aprender temporadas de años anteriores)
+  let primero = null, primeroAll = null;
+  const desdeMin = addDias(fin, -ventana);
+  for (const m of movs) {
+    if (m.estado === 'anulado') continue;
+    const esSal = m.tipo === 'salida', esFal = m.tipo === 'ajuste' && m.delta < 0;
+    if (!esSal && !esFal) continue;
+    const d = new Date(m.creado_en);
+    if (d >= fin) continue;
+    if (esSal) { const k0 = ymd(d); totAll.set(k0, (totAll.get(k0) || 0) + qtyEf(m)); if (!primeroAll || d < primeroAll) primeroAll = d; }
+    if (d < desdeMin) continue;
+    if (esSal && (!primero || d < primero)) primero = d;
+    if (esFal) { falTot.set(m.premio_id, (falTot.get(m.premio_id) || 0) + uFalt(m)); continue; }
+    const k = ymd(d), q = qtyEf(m);
+    if (!regDia.has(k)) regDia.set(k, new Map());
+    const mp = regDia.get(k); mp.set(m.premio_id, (mp.get(m.premio_id) || 0) + q);
+    regTot.set(m.premio_id, (regTot.get(m.premio_id) || 0) + q);
+  }
+  const vacio = { vacio: true, n: 0, idx: [1, 1, 1, 1, 1, 1, 1], nW: [0, 0, 0, 0, 0, 0, 0], tr: 1, ratio: null, F: 1, nFer: 0, R: 0, tasas: new Map(), merma: 0, fin, esp, cal, FT: new Map(), totDia: new Map() };
+  if (!primero) return vacio;
+
+  // Días de entrenamiento: desde el primer retiro hasta ayer; los cerrados no cuentan
+  const dias = [];
+  for (let d = inicioDia(primero); d < fin; d = addDias(d, 1)) {
+    const k = ymd(d), e = esp.get(k);
+    if (esCerrado(e)) continue;
+    const mp = regDia.get(k) || new Map();
+    dias.push({ d, k, dow: d.getDay(), esp: e || null, temp: cal.temporadaDe(k), mp, tot: sum([...mp.values()]) });
+  }
+  const normales = dias.filter(x => !x.esp);
+  const n = normales.length;
+  if (!n) return Object.assign(vacio, { vacio: false, n: 0 });
+
+  // 0. Días sin stock por premio: ese día se retiró poco porque no había, no porque se pidiera menos.
+  //    Se excluyen al calcular el consumo de ese premio (si no, el pedido saldría corto).
+  const sinStock = new Map(); // premio_id -> Set('yyyy-mm-dd')
+  {
+    const porP = new Map();
+    movs.forEach(m => { if (m.stock_nuevo == null) return; const d = new Date(m.creado_en); if (d >= fin) return; if (!porP.has(m.premio_id)) porP.set(m.premio_id, []); porP.get(m.premio_id).push(m); });
+    const ini0 = dias[0].d;
+    porP.forEach((arr, pid) => {
+      arr.sort((a, b) => a.id - b.id);
+      const set = new Set(); let i = 0, stock = 0, hay = false;
+      while (i < arr.length && new Date(arr[i].creado_en) < ini0) { stock = arr[i].stock_nuevo; hay = true; i++; }
+      for (let d = ini0; d < fin; d = addDias(d, 1)) {
+        const fd = addDias(d, 1); let min = hay ? stock : 0;
+        while (i < arr.length && new Date(arr[i].creado_en) < fd) { stock = arr[i].stock_nuevo; hay = true; min = Math.min(min, stock); i++; }
+        if (min <= 0) set.add(ymd(d));
+      }
+      sinStock.set(pid, set);
+    });
+  }
+
+  // 1. Día de la semana (todos los premios juntos), con encogimiento hacia 1.
+  //    Si hay suficientes días fuera de temporadas, se usan solo esos.
+  const fueraTemp = normales.filter(x => !x.temp);
+  const baseIdx = fueraTemp.length >= 14 ? fueraTemp : normales;
+  const sW = [0, 0, 0, 0, 0, 0, 0], nW = [0, 0, 0, 0, 0, 0, 0];
+  baseIdx.forEach(x => { sW[x.dow] += x.tot; nW[x.dow]++; });
+  const medias = sW.map((s, i) => nW[i] ? s / nW[i] : null);
+  const conDatos = medias.filter(v => v != null);
+  const prom = conDatos.length ? sum(conDatos) / conDatos.length : 0;
+  const K = 2;
+  let idx = medias.map((v, i) => (v == null || prom <= 0) ? 1 : (nW[i] * (v / prom) + K) / (nW[i] + K));
+  const pIdx = sum(idx) / 7; idx = idx.map(v => v / pIdx);
+
+  // 2. Temporadas con efecto automático: se compara el consumo durante la temporada con las 4 semanas
+  //    anteriores a que empiece (en este año y en años anteriores con el mismo nombre).
+  const FT = new Map(); // nombreBase -> { f, dias }
+  const desest = k => (totAll.get(k) || 0) / idx[parseYmd(k).getDay()];
+  const abierto = k => !esCerrado(esp.get(k)) && !esp.get(k);
+  cal.temps.filter(t => t.factor == null && t.fecha < ymd(fin)).forEach(t => {
+    const ini = parseYmd(t.fecha), base = [];
+    for (let i = 1; i <= 28; i++) { const k = ymd(addDias(ini, -i)); if (primeroAll && parseYmd(k) >= inicioDia(primeroAll) && abierto(k) && !cal.temporadaDe(k)) base.push(desest(k)); }
+    const durante = [];
+    for (let d = ini; ymd(d) <= t.fecha_fin && d < fin; d = addDias(d, 1)) { const k = ymd(d); if (abierto(k)) durante.push(desest(k)); }
+    if (base.length < 7 || !durante.length) return;
+    const b = sum(base) / base.length; if (b <= 0) return;
+    const r = (sum(durante) / durante.length) / b, nb = nombreBase(t.nombre);
+    const acc = FT.get(nb) || { sr: 0, w: 0 };
+    acc.sr += r * durante.length; acc.w += durante.length; FT.set(nb, acc);
+  });
+  FT.forEach((a, k) => FT.set(k, { f: (a.sr + 4) / (a.w + 4), dias: a.w })); // con pocos días se acerca a 1
+  const fTemp = t => !t ? 1 : t.factor != null ? Number(t.factor) : ((FT.get(nombreBase(t.nombre)) || {}).f || 1);
+
+  // 3. Consumo base por premio (sin efecto de día de semana ni de temporada, ponderado por antigüedad)
+  const peso = x => Math.pow(0.5, (fin - x.d) / DIA_MS / 14);
+  const sumW = sum(normales, peso), sumW2 = sum(normales, x => peso(x) ** 2);
+  const nEff = sumW * sumW / sumW2;                       // cuántos días "valen" los datos ponderados
+  const edadMedia = sum(normales, x => peso(x) * (fin - x.d) / DIA_MS) / sumW;
+  normales.forEach(x => { x.div = idx[x.dow] * (fTemp(x.temp) || 1); });
+  const pids = new Set([...regTot.keys(), ...falTot.keys()]);
+  const tasas = new Map();
+  pids.forEach(pid => {
+    const fuera = sinStock.get(pid) || new Set();
+    let s = 0, s2 = 0, sw = 0, sw2 = 0, nOk = 0;
+    normales.forEach(x => { if (fuera.has(x.k)) return; const v = (x.mp.get(pid) || 0) / x.div; const w = peso(x); s += w * v; s2 += w * v * v; sw += w; sw2 += w * w; nOk++; });
+    if (!sw) { sw = sumW; sw2 = sumW2; }                  // nunca tuvo stock en la ventana: se usa lo que haya
+    let r = s / sw;
+    let v = Math.max(s2 / sw - r * r, 0);
+    const nEffP = sw * sw / sw2;
+    const reg = regTot.get(pid) || 0, fal = falTot.get(pid) || 0;
+    let m = 0;
+    if (reg > 0) m = Math.min(fal / reg, 1);
+    else if (fal > 0) { r = fal / dias.length; v = r; }   // solo hubo faltantes: se reparten por día
+    v = Math.max(v, r);                                   // piso tipo Poisson para conteos chicos
+    // incertidumbre de estimar el nivel + un 7 % de error de modelo, porque la realidad nunca es exactamente como el patrón aprendido
+    const relVar = r > 0 ? (v / nEffP) / (r * r) + 0.07 ** 2 : 0;
+    tasas.set(pid, { r, v, m, reg, fal, relVar, diasSinStock: fuera.size, diasOk: nOk });
+  });
+  const R = sum([...tasas.values()], t => t.reg > 0 ? t.r : 0);
+
+  // 4. Tendencia: recta sobre el consumo diario (sin día de semana ni temporada) de las últimas 8 semanas.
+  //    Solo se aplica si es clara (no ruido) y con tope de ±25 %.
+  let tr = 1, ratio = null, trRelVar = 0, pend = 0;
+  if (n >= 28 && R > 0) {
+    const pts = normales.slice(-56).map(x => ({ t: -(fin - x.d) / DIA_MS, y: x.tot / x.div }));
+    const N = pts.length, mt = sum(pts, p => p.t) / N, my = sum(pts, p => p.y) / N;
+    const sxx = sum(pts, p => (p.t - mt) ** 2), b = sum(pts, p => (p.t - mt) * (p.y - my)) / sxx;
+    const res = sum(pts, p => (p.y - my - b * (p.t - mt)) ** 2) / Math.max(N - 2, 1);
+    const seB = Math.sqrt(res / sxx);
+    ratio = 1 + b * 14 / R;                                // cambio cada 2 semanas
+    if (Math.abs(b) > 2 * seB) {
+      pend = b / R;                                        // cambio relativo por día
+      tr = Math.min(1.25, Math.max(0.8, 1 + pend * edadMedia));
+      trRelVar = (seB * (edadMedia + 7) / R) ** 2;
+    }
+  }
+
+  // 5. Efecto de los feriados en que se abrió (aprende de los anteriores)
+  let act = 0, exp = 0, nFer = 0;
+  dias.filter(x => esFeriado(x.esp) && x.esp.factor == null).forEach(x => { act += x.tot; exp += R * idx[x.dow] * fTemp(x.temp); nFer++; });
+  const unDia = R; // un día "promedio" de pseudo-dato para no exagerar con 1 feriado
+  const F = nFer && exp > 0 ? (act + unDia) / (exp + unDia) : 1;
+
+  // 6. Ritmo dentro del día: qué parte del total diario suele estar retirada a cada hora
+  const porHora = new Array(24).fill(0);
+  const normK = new Set(normales.map(x => x.k));
+  movs.forEach(m => {
+    if (m.tipo !== 'salida' || m.estado === 'anulado') return;
+    const d = new Date(m.creado_en); if (d >= fin || d < desdeMin || !normK.has(ymd(d))) return;
+    porHora[d.getHours()] += qtyEf(m);
+  });
+  const diasHora = normales.filter(x => x.tot > 0).length;
+  const totH = sum(porHora); let ac = 0;
+  const curva = totH > 0 && diasHora >= 5 ? porHora.map(v => (ac += v) / totH) : null; // acumulado al final de cada hora
+
+  const regSum = sum([...regTot.values()]), falSum = sum([...falTot.values()]);
+  const totDia = new Map(dias.map(x => [x.k, x.tot]));
+  return { vacio: false, n, nEff, edadMedia, pend, dias: dias.length, inicio: inicioDia(primero), fin, idx, nW, tr, trRelVar, ratio, F, nFer, R, tasas, esp, cal, FT, fTemp, merma: regSum ? falSum / regSum : 0, totDia, curva };
+}
+
+// Cuánto cambia el consumo en una fecha respecto de un día base (fecha especial × temporada)
+function factorFecha(M, d) {
+  const k = ymd(d), e = M.esp.get(k), t = M.cal ? M.cal.temporadaDe(k) : null;
+  const ft = t ? (M.fTemp ? M.fTemp(t) : (t.factor != null ? Number(t.factor) : 1)) : 1;
+  const tTxt = !t ? '' : t.factor != null ? efectoTxt(ft) : (M.FT && M.FT.get(nombreBase(t.nombre))) ? `Automático: ${efectoTxt(ft)}` : 'Automático: todavía sin datos';
+  if (esCerrado(e)) return { f: 0, e, t, txt: 'Cerrado' };
+  let fd = 1, dTxt = '';
+  if (e && e.factor != null) { fd = Number(e.factor); dTxt = efectoTxt(fd); }
+  else if (esFeriado(e)) { fd = M.F; dTxt = M.nFer ? `Automático: ${efectoTxt(M.F)}` : 'Automático: como un día normal'; }
+  return { f: fd * ft, e: e || null, t, txt: e ? dTxt : tTxt, tTxt };
+}
+const efectoTxt = f => f === 0 ? 'Cerrado' : Math.abs(f - 1) < 0.03 ? 'Normal' : f > 1 ? `+${Math.round((f - 1) * 100)}%` : `−${Math.round((1 - f) * 100)}%`;
+// Tendencia a una fecha: el nivel de hoy más lo que siga cambiando hasta ese día (con tope de ±25 %)
+const trendFecha = (M, d) => !M.pend ? M.tr : Math.min(1.25, Math.max(0.8, 1 + M.pend * (M.edadMedia + Math.max(0, (inicioDia(d) - M.fin) / DIA_MS))));
+const multFecha = (M, d) => M.idx[new Date(d).getDay()] * trendFecha(M, d) * factorFecha(M, d).f;
+
+// Parte del día ya transcurrida según el ritmo habitual (0 a 1)
+function avanceDia(M, ahora = new Date()) {
+  if (!M.curva) return null;
+  const h = ahora.getHours(), fr = ahora.getMinutes() / 60;
+  const antes = h > 0 ? M.curva[h - 1] : 0;
+  return antes + (M.curva[h] - antes) * fr;
+}
+// ¿Hoy viene más o menos movido que lo normal? (solo cuando ya pasó al menos 15 % del día habitual)
+function ritmoHoy(M, hoyReg, ahora = new Date()) {
+  const av = avanceDia(M, ahora);
+  const esperadoTotal = M.R * multFecha(M, ahora);
+  const ya = sum([...hoyReg.values()]);
+  if (av == null || av < 0.15 || esperadoTotal <= 0) return { av, ya, esperadoTotal, ratio: null, factor: 1 };
+  const ratio = ya / (esperadoTotal * av);
+  // se confía más en el ritmo a medida que avanza el día
+  const factor = Math.min(2, Math.max(0.5, 1 + (ratio - 1) * Math.min(1, av / 0.5)));
+  return { av, ya, esperadoTotal, ratio, factor };
+}
+
+// Proyección día por día. Hoy cuenta solo lo que falta, ajustado por el ritmo del día.
+function proyectar(M, desde, nDias, hoyReg = new Map()) {
+  const out = new Map(); // pid -> { e:[], v:[] }
+  const hoyK = ymd(new Date());
+  const rit = ritmoHoy(M, hoyReg), av = rit.av;
+  M.tasas.forEach((t, pid) => {
+    const e = [], v = [];
+    for (let i = 0; i < nDias; i++) {
+      const d = addDias(desde, i), mu = multFecha(M, d), k = 1 + t.m;
+      let ei = t.r * k * mu, vi = t.v * k * k * mu * mu;
+      if (ymd(d) === hoyK) {
+        const ya = hoyReg.get(pid) || 0;
+        // con ritmo conocido: lo que falta del día, escalado por cómo viene hoy; si no, lo esperado menos lo ya retirado
+        const rest = av != null ? Math.max(ei * (1 - av) * rit.factor, 0) : Math.max(ei - ya, 0);
+        vi = ei > 0 ? vi * Math.min(1, rest / ei) : 0; ei = rest;
+      }
+      e.push(ei); v.push(vi);
+    }
+    out.set(pid, { e, v });
+  });
+  return out;
+}
+
+// ¿Qué tan bien habría acertado? Pronostica cada uno de los últimos 7 días con lo que se sabía el día anterior.
+function backtest(movs = S.movs, especiales = S.especiales || []) {
+  const hoy = inicioDia(new Date());
+  const M0 = modeloPronostico({ hasta: hoy, movs, especiales });
+  if (M0.vacio || M0.n < 21) return null;
+  let sp = 0, sa = 0, sabs = 0, dias = 0;
+  const filas = [];
+  for (let k = 7; k >= 1; k--) {
+    const d = addDias(hoy, -k);
+    const e = M0.esp.get(ymd(d));
+    if (esCerrado(e)) continue;
+    const Mk = modeloPronostico({ hasta: d, movs, especiales });
+    if (Mk.vacio || Mk.n < 14) continue;
+    const pred = Mk.R * multFecha(Mk, d), act = M0.totDia.get(ymd(d)) || 0;
+    sp += pred; sa += act; sabs += Math.abs(pred - act); dias++;
+    filas.push({ d, pred, act });
+  }
+  if (!dias || sa <= 0) return null;
+  return { semana: Math.abs(sp - sa) / sa, diario: sabs / sa, pred: sp, act: sa, dias, filas };
+}
+
+// Cuántas unidades se retiraron hoy (por premio)
+function retiradoHoy(movs = S.movs) {
+  const k = ymd(new Date()), mp = new Map();
+  movs.forEach(m => { if (m.tipo === 'salida' && m.estado !== 'anulado' && ymd(m.creado_en) === k) mp.set(m.premio_id, (mp.get(m.premio_id) || 0) + qtyEf(m)); });
+  return mp;
+}
+
+// Plan completo para la vista: pedido sugerido, fecha en que se acaba, etc.
+function planCompras({ per = 7, entrega = 3, margen = 'alto' } = {}) {
+  const z = (MARGENES[margen] || MARGENES.alto).z;
+  const hoy = inicioDia(new Date());
+  const M = modeloPronostico({ hasta: hoy });
+  const hoyReg = retiradoHoy();
+  const largo = Math.max(per, 120);
+  const P = proyectar(M, hoy, largo, hoyReg);
+  const filas = S.premios.filter(p => p.activo).map(p => {
+    const t = M.tasas.get(p.id), pr = P.get(p.id);
+    if (!t || !pr || (t.reg === 0 && t.fal === 0)) return { p, sinDatos: true, necesita: 0, pedido: 0, estado: 'sin', porDia: 0, lo: 0, hi: 0, agota: null };
+    const e = pr.e.slice(0, per), v = pr.v.slice(0, per);
+    const necesita = sum(e);
+    // variación día a día + error de estimar el nivel y la tendencia (afecta a todo el período junto)
+    const sd = Math.sqrt(sum(v) + necesita * necesita * (t.relVar + (M.trRelVar || 0)));
+    const lo = Math.max(0, necesita - Z80 * sd), hi = necesita + Z80 * sd;
+    // ¿cuándo se acaba?
+    let acum = 0, agota = null;
+    if (p.stock_actual <= 0) agota = hoy;
+    else for (let i = 0; i < largo; i++) { acum += pr.e[i]; if (acum > p.stock_actual) { agota = addDias(hoy, i); break; } }
+    let pedido = Math.ceil(necesita + z * sd + (p.stock_minimo || 0) - p.stock_actual);
+    if (necesita <= 0.05) pedido = 0;
+    pedido = Math.max(0, pedido);
+    const pk = Number(p.unidades_por_paquete) || 0;
+    const paquetes = pk > 1 && pedido > 0 ? Math.ceil(pedido / pk) : 0;
+    if (paquetes) pedido = paquetes * pk;
+    const llega = addDias(hoy, entrega);
+    const estado = (p.stock_actual <= 0 || (agota && agota < llega)) ? 'urgente' : pedido > 0 ? 'comprar' : 'ok';
+    return { p, t, necesita, lo, hi, cubre: necesita + z * sd, agota, pedido, paquetes, pk, estado, porDia: t.r * (1 + t.m) * M.tr };
+  });
+  const orden = { urgente: 0, comprar: 1, ok: 2, sin: 3 };
+  filas.sort((a, b) => orden[a.estado] - orden[b.estado] || (a.agota && b.agota ? a.agota - b.agota : a.agota ? -1 : b.agota ? 1 : 0) || b.necesita - a.necesita || a.p.nombre.localeCompare(b.p.nombre, 'es'));
+  return { M, P, hoy, hoyReg, filas, rit: ritmoHoy(M, hoyReg), z };
+}
+
+/* =============================================================
+   VISTA: PRONÓSTICO Y COMPRAS
+   ============================================================= */
+const prF = () => { const f = S.f.pron; try { const g = JSON.parse(localStorage.getItem('sp_pron') || '{}'); ['per', 'entrega', 'margen'].forEach(k => { if (g[k] != null && f._init !== true) f[k] = g[k]; }); } catch (e) { /* ignorar */ } f._init = true; return f; };
+const prGuardar = f => { try { localStorage.setItem('sp_pron', JSON.stringify({ per: f.per, entrega: f.entrega, margen: f.margen })); } catch (e) { /* ignorar */ } };
+const fU = n => fNum(Math.round(n));
+const pct = r => `${r >= 0 ? '+' : '−'}${Math.round(Math.abs(r) * 100)}%`;
+const fechaCorta = d => { const x = new Date(d); return `${DOW_SG[x.getDay()]} ${x.getDate()}/${x.getMonth() + 1}`; };
+const EFECTOS = [
+  { v: '', t: 'Automático (la app lo aprende de feriados anteriores)' },
+  { v: '0', t: 'Cerrado: no se retira nada' },
+  { v: '0.5', t: 'Mucho menos movimiento (−50%)' },
+  { v: '0.75', t: 'Menos movimiento (−25%)' },
+  { v: '1', t: 'Normal' },
+  { v: '1.25', t: 'Más movimiento (+25%)' },
+  { v: '1.5', t: 'Mucho más movimiento (+50%)' },
+  { v: '2', t: 'El doble' }
+];
+const ESTADO_PR = {
+  urgente: { t: 'Urgente', c: 'out', i: 'siren' },
+  comprar: { t: 'Comprar', c: 'low', i: 'shopping-cart' },
+  ok: { t: 'Alcanza', c: 'ok', i: 'circle-check' },
+  sin: { t: 'Sin retiros', c: 'mute', i: 'minus' }
+};
+
+VIEWS.pronostico = {
+  title: () => 'Pronóstico y compras',
+  mount(el) {
+    const f = prF();
+    el.innerHTML = `
+      <div class="page-head"><p>Aprende de cada retiro: qué días se retira más, hacia dónde va el consumo y cuánto vas a necesitar. Se recalcula solo con cada movimiento.</p></div>
+      <div class="panel"><div class="panel-b pron-ctl">
+        <div class="pc-g"><span class="lbl">Período a cubrir</span>
+          <div class="chips" id="pr-per">${[7, 14, 30].map(n => `<button class="chip" data-per="${n}">${n} días</button>`).join('')}</div></div>
+        <div class="pc-g"><span class="lbl" id="pr-ent-l">La mercadería tarda en llegar</span>
+          <div class="stepper sm" role="group" aria-labelledby="pr-ent-l"><button type="button" data-ent="-1" aria-label="Un día menos">${ic('minus', 's')}</button><span class="stv"><b id="pr-ent">${f.entrega}</b> días</span><button type="button" data-ent="1" aria-label="Un día más">${ic('plus', 's')}</button></div></div>
+        <div class="pc-g"><span class="lbl">Margen de seguridad</span>
+          <div class="chips" id="pr-mg">${Object.entries(MARGENES).map(([k, m]) => `<button class="chip" data-mg="${k}" title="${m.s}">${m.t}</button>`).join('')}</div>
+          <span class="hint" id="pr-mg-s"></span></div>
+      </div></div>
+      <div id="pr-aviso"></div>
+      <div class="kpis k4 mt" id="pr-kpis"></div>
+      <div class="panel">
+        <div class="panel-h"><h2>Consumo real y pronóstico</h2><span class="sub" id="pr-ch-sub"></span><span class="sp"></span>
+          <div class="chips" id="pr-gr"><button class="chip" data-gr="dia">Por día</button><button class="chip" data-gr="semana">Por semana</button></div></div>
+        <div class="chart-box"><canvas id="pr-chart" aria-label="Gráfico de consumo real y pronóstico"></canvas></div>
+      </div>
+      <div class="cols-2e mt">
+        <div class="panel"><div class="panel-h"><h2>Qué días se retira más</h2><span class="sub">Comparado con un día promedio</span></div><div class="panel-b flush" id="pr-dow"></div></div>
+        <div class="panel"><div class="panel-h"><h2>Lo que detectó</h2></div><ul class="ins" id="pr-ins"></ul></div>
+      </div>
+      <div class="panel mt">
+        <div class="panel-h"><h2>Qué comprar</h2><span class="sub" id="pr-t-sub"></span><span class="sp"></span>
+          <label class="check"><input type="checkbox" id="pr-solo" ${f.soloComprar ? 'checked' : ''}> Solo lo que hay que comprar</label>${expBtns('pr')}</div>
+        <div class="tbl-wrap" style="margin-top:8px"><table class="rt resp pr-t">
+          <thead><tr><th>Premio</th><th class="n">Stock</th><th class="n">Por día</th><th class="n">Necesitas</th><th>Alcanza hasta</th><th class="n">Comprar</th><th>Estado</th></tr></thead>
+          <tbody id="pr-tb"></tbody></table></div>
+      </div>
+      <div class="panel mt">
+        <div class="panel-h"><h2>Fechas especiales y temporadas</h2><span class="sub">Feriados, cierres, eventos, vacaciones y vuelta a clases</span><span class="sp"></span>
+          <button class="btn sm pri" id="pr-addf">${ic('calendar-plus', 's')}Agregar fecha</button></div>
+        <ul class="list fe-list" id="pr-fechas" style="margin-top:8px"></ul>
+        <div class="panel-b" style="padding-top:6px"><button class="btn sm ghost" id="pr-todas"></button></div>
+      </div>
+      <p class="muted pr-pie">Cómo calcula: toma lo retirado en las últimas 12 semanas (lo reciente pesa más), el efecto de cada día de la semana, la tendencia, los faltantes de inventario, los feriados y las temporadas (vacaciones, vuelta a clases, fiestas), que aprende comparando con las semanas anteriores y con el año pasado. Los días cerrados no se cuentan. El pedido sugerido cubre el período con el margen elegido y deja al menos el stock mínimo de cada premio.</p>`;
+
+    const c = chartColors();
+    const alfa = (hex, a) => { const h = hex.replace('#', ''); const n = parseInt(h.length === 3 ? h.split('').map(x => x + x).join('') : h, 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
+    const o = chartOpts(c, true); o.scales.x.stacked = true; o.scales.y.stacked = true;
+    o.plugins.tooltip.callbacks = {
+      label: ctx => {
+        const v = ctx.parsed.y; if (!v) return null;
+        const extra = ctx.dataset._rango && ctx.dataset._rango[ctx.dataIndex];
+        return `${ctx.dataset.label}: ${fU(v)}${extra ? ` (entre ${fU(extra[0])} y ${fU(extra[1])})` : ''}`;
+      }
+    };
+    this.chart = makeChart($('#pr-chart'), {
+      type: 'bar',
+      data: { labels: [], datasets: [
+        { label: 'Retirado', data: [], backgroundColor: c.s2, borderRadius: 4, maxBarThickness: 22, categoryPercentage: .8, barPercentage: .9, stack: 's' },
+        { label: 'Faltantes sin identificar', data: [], backgroundColor: c.s3, borderRadius: 4, maxBarThickness: 22, categoryPercentage: .8, barPercentage: .9, stack: 's' },
+        { label: 'Pronóstico', data: [], backgroundColor: alfa(c.s2, .22), borderColor: c.s2, borderWidth: { top: 2, left: 0, right: 0, bottom: 0 }, borderSkipped: false, borderRadius: 4, maxBarThickness: 22, categoryPercentage: .8, barPercentage: .9, stack: 's', _rango: [] }
+      ] },
+      options: o
+    });
+
+    const re = () => { prGuardar(f); this.paint(); icons(); };
+    $('#pr-per').onclick = e => { const b = e.target.closest('[data-per]'); if (!b) return; f.per = +b.dataset.per; re(); };
+    $('#pr-mg').onclick = e => { const b = e.target.closest('[data-mg]'); if (!b) return; f.margen = b.dataset.mg; re(); };
+    $('#pr-gr').onclick = e => { const b = e.target.closest('[data-gr]'); if (!b) return; f.gr = b.dataset.gr; re(); };
+    el.querySelector('.stepper').onclick = e => { const b = e.target.closest('[data-ent]'); if (!b) return; f.entrega = Math.min(30, Math.max(0, f.entrega + +b.dataset.ent)); $('#pr-ent').textContent = f.entrega; re(); };
+    $('#pr-solo').onchange = e => { f.soloComprar = e.target.checked; re(); };
+    $('#pr-todas').onclick = () => { f.todas = !f.todas; this.paintFechas(); icons(); };
+    $('#pr-addf').onclick = () => modalFecha();
+    $('#pr-fechas').onclick = e => { const b = e.target.closest('[data-fe]'); if (b) modalFecha((S.especiales || []).find(x => x.id === +b.dataset.fe)); };
+    $('#pr-tb').onclick = e => { const r = e.target.closest('[data-pp]'); if (r) modalPronPremio(+r.dataset.pp); };
+    bindExp(el, 'pr', () => ({
+      base: 'lista_de_compras',
+      title: `Qué comprar: próximos ${f.per} días (margen ${MARGENES[f.margen].t.toLowerCase()}, la mercadería tarda ${f.entrega} días)`,
+      cols: [
+        { h: 'Premio', v: r => r.p.nombre },
+        { h: 'Stock actual', v: r => r.p.stock_actual },
+        { h: 'Consumo por día', v: r => r.sinDatos ? 0 : Math.round(r.porDia * 10) / 10 },
+        { h: `Necesario ${f.per} días`, v: r => Math.round(r.necesita) },
+        { h: 'Rango probable', v: r => r.sinDatos ? '' : `${Math.round(r.lo)} a ${Math.round(r.hi)}` },
+        { h: 'Alcanza hasta', v: r => r.sinDatos ? 'Sin retiros' : !r.agota ? 'Más de 4 meses' : r.agota <= this.plan.hoy ? 'Agotado' : fFecha(r.agota) },
+        { h: 'Comprar (unidades)', v: r => r.pedido },
+        { h: 'Paquetes', v: r => r.paquetes ? `${r.paquetes} x ${r.pk}` : '' },
+        { h: 'Estado', v: r => ESTADO_PR[r.estado].t }
+      ],
+      rows: this.filasVisibles()
+    }));
+    this.paint();
+    if (S.especialesErr) $('#pr-aviso').innerHTML = `<div class="callout warn mt">${ic('database', 's')}<span>Para guardar fechas especiales y cajas por premio falta ejecutar en Supabase el archivo <b>migracion_08_pronostico.sql</b>. El pronóstico funciona igual.</span></div>`;
+  },
+
+  filasVisibles() { const f = S.f.pron; return (this.plan ? this.plan.filas : []).filter(r => !f.soloComprar || r.pedido > 0 || r.estado === 'urgente'); },
+
+  paint() {
+    if (!$('#pr-tb')) return;
+    const f = S.f.pron;
+    $$('#pr-per .chip').forEach(b => b.classList.toggle('on', +b.dataset.per === f.per));
+    $$('#pr-mg .chip').forEach(b => b.classList.toggle('on', b.dataset.mg === f.margen));
+    $$('#pr-gr .chip').forEach(b => b.classList.toggle('on', b.dataset.gr === f.gr));
+    $('#pr-mg-s').textContent = MARGENES[f.margen].s;
+    const plan = this.plan = planCompras({ per: f.per, entrega: f.entrega, margen: f.margen });
+    const { M, hoy, hoyReg, rit } = plan;
+
+    if (M.vacio) {
+      $('#pr-kpis').innerHTML = '';
+      $('#pr-aviso').innerHTML = `<div class="callout info mt">${ic('sparkles', 's')}<span>Todavía no hay retiros registrados. Con los primeros días de uso la app empieza a detectar el consumo, y a partir de las 2 semanas ya reconoce los días más movidos.</span></div>`;
+    } else if (!S.especialesErr) $('#pr-aviso').innerHTML = '';
+
+    // ---- KPIs
+    const ya = sum([...hoyReg.values()]);
+    const hoyF = factorFecha(M, hoy);
+    const espHoy = M.R * multFecha(M, hoy);
+    const lunesH = lunes(hoy);
+    const regEn = (a, b) => sum(salidasVig().filter(m => { const d = new Date(m.creado_en); return d >= a && d < b; }), qtyEf);
+    const ahora = new Date();
+    const semAct = regEn(lunesH, ahora), semAnt = regEn(addDias(lunesH, -7), new Date(ahora - 7 * DIA_MS));
+    const conDatos = plan.filas.filter(r => !r.sinDatos);
+    const nec = sum(conDatos, r => r.necesita), lo = sum(conDatos, r => r.lo), hi = sum(conDatos, r => r.hi);
+    const nComprar = plan.filas.filter(r => r.pedido > 0).length, nUrg = plan.filas.filter(r => r.estado === 'urgente').length;
+    const bt = backtest();
+    const conf = M.vacio || M.n < 14 ? { t: 'Baja', c: 'warn', s: `Lleva ${M.n || 0} día(s) de datos; mejora a partir de las 2 semanas` }
+      : (M.n < 42 || (bt && bt.semana > 0.25)) ? { t: 'Media', c: 'low', s: bt ? `La semana pasada se desvió ${Math.round(bt.semana * 100)}%` : `${M.n} días de datos` }
+      : { t: 'Alta', c: 'ok', s: bt ? `La semana pasada se desvió ${Math.round(bt.semana * 100)}%` : `${M.n} días de datos` };
+    let ritTxt = '';
+    if (hoyF.f === 0) ritTxt = 'Hoy está cerrado';
+    else if (rit.ratio != null) ritTxt = Math.abs(rit.ratio - 1) < 0.1 ? 'Viene al ritmo normal' : `Viene un ${Math.round(Math.abs(rit.ratio - 1) * 100)}% ${rit.ratio > 1 ? 'más movido' : 'más tranquilo'} que lo normal`;
+    else ritTxt = `Lo normal para un ${DOW_SG[hoy.getDay()]}: ~${fU(espHoy)}`;
+    $('#pr-kpis').innerHTML = M.vacio ? '' : `
+      <div class="kpi ${rit.ratio != null && rit.ratio > 1.15 ? 'warn' : ''}"><span class="kpi-l">${ic('sun', 's')}Hoy</span><span class="kpi-v">${fNum(ya)}</span><span class="kpi-s">${ritTxt}</span></div>
+      <div class="kpi"><span class="kpi-l">${ic('calendar-range', 's')}Esta semana</span><span class="kpi-v">${fNum(semAct)}</span><span class="kpi-s">${semAnt > 0 ? `${pct(semAct / semAnt - 1)} que la semana pasada a esta altura` : `De lunes a ${DOW_SG[hoy.getDay()]}`}</span></div>
+      <div class="kpi"><span class="kpi-l">${ic('package-search', 's')}Necesitas en ${f.per} días</span><span class="kpi-v">~${fU(nec)}</span><span class="kpi-s">Entre ${fU(lo)} y ${fU(hi)} unidades${nComprar ? ` · ${nComprar} premio(s) para comprar` : ''}</span></div>
+      <div class="kpi ${nUrg ? 'bad' : ''}"><span class="kpi-l">${ic('gauge', 's')}Confianza: ${conf.t}</span><span class="kpi-v">${nUrg ? `${nUrg} urgente${nUrg > 1 ? 's' : ''}` : 'Al día'}</span><span class="kpi-s">${conf.s}</span></div>`;
+
+    this.paintChart(plan);
+    this.paintDow(M);
+    this.paintIns(plan, bt, semAct, semAnt);
+    this.paintTabla(plan);
+    this.paintFechas();
+  },
+
+  paintChart({ P, hoy }) {
+    const f = S.f.pron, ch = this.chart; if (!ch) return;
+    const regPorDia = new Map(), falPorDia = new Map();
+    salidasVig().forEach(m => { const k = ymd(m.creado_en); regPorDia.set(k, (regPorDia.get(k) || 0) + qtyEf(m)); });
+    faltantes().forEach(m => { const k = ymd(m.creado_en); falPorDia.set(k, (falPorDia.get(k) || 0) + uFalt(m)); });
+    const pronDia = i => { let e = 0, v = 0; P.forEach(x => { e += x.e[i] || 0; v += x.v[i] || 0; }); return { e, v }; };
+    const L = [], R1 = [], R2 = [], PR = [], RG = [];
+    if (f.gr === 'dia') {
+      for (let i = -27; i < f.per; i++) {
+        const d = addDias(hoy, i), k = ymd(d);
+        L.push(i === 0 ? 'Hoy' : fDiaC(d));
+        if (i <= 0) { R1.push(regPorDia.get(k) || 0); R2.push(falPorDia.get(k) || 0); } else { R1.push(0); R2.push(0); }
+        if (i >= 0) { const p = pronDia(i); PR.push(p.e); RG.push([Math.max(0, p.e - Z80 * Math.sqrt(p.v)), p.e + Z80 * Math.sqrt(p.v)]); } else { PR.push(0); RG.push(null); }
+      }
+      $('#pr-ch-sub').textContent = `Últimas 4 semanas y próximos ${f.per} días`;
+    } else {
+      const l0 = lunes(hoy);
+      const semanas = Math.ceil((f.per + (hoy - l0) / DIA_MS) / 7);
+      for (let w = -7; w < semanas; w++) {
+        const a = addDias(l0, w * 7);
+        let r = 0, fa = 0, e = 0, v = 0;
+        for (let j = 0; j < 7; j++) {
+          const d = addDias(a, j), k = ymd(d), i = Math.round((d - hoy) / DIA_MS);
+          if (i <= 0) { r += regPorDia.get(k) || 0; fa += falPorDia.get(k) || 0; }
+          if (i >= 0 && i < f.per) { const p = pronDia(i); e += p.e; v += p.v; }
+        }
+        L.push(w === 0 ? 'Esta semana' : `Sem. ${a.getDate()}/${a.getMonth() + 1}`);
+        R1.push(r); R2.push(fa); PR.push(e); RG.push(e ? [Math.max(0, e - Z80 * Math.sqrt(v)), e + Z80 * Math.sqrt(v)] : null);
+      }
+      $('#pr-ch-sub').textContent = 'Semanas de lunes a domingo';
+    }
+    ch.data.labels = L;
+    ch.data.datasets[0].data = R1; ch.data.datasets[1].data = R2; ch.data.datasets[2].data = PR.map(x => Math.round(x * 10) / 10); ch.data.datasets[2]._rango = RG;
+    ch.data.datasets[1].hidden = !R2.some(Boolean);
+    ch.update();
+  },
+
+  paintDow(M) {
+    const box = $('#pr-dow');
+    if (M.vacio || M.n < 7) { box.innerHTML = `<div class="empty">${ic('calendar-days')}<b>Hace falta al menos una semana de datos</b>Lleva ${M.n || 0} día(s).</div>`; return; }
+    const orden = [1, 2, 3, 4, 5, 6, 0], max = Math.max(...M.idx);
+    box.innerHTML = orden.map(d => {
+      const v = M.idx[d], dif = v - 1;
+      return `<div class="hbar dow ${dif > 0.08 ? 'up' : dif < -0.08 ? 'down' : ''}"><span class="nm">${DOW_SG[d][0].toUpperCase() + DOW_SG[d].slice(1)}</span><span class="tr"><i style="width:${(v / max * 100).toFixed(1)}%"></i></span><span class="num strong">${Math.abs(dif) < 0.03 ? 'Normal' : pct(dif)}</span></div>`;
+    }).join('') + `<p class="muted dow-n">Basado en ${M.n} días. ${M.n < 21 ? 'Con 3 semanas o más el patrón es más preciso.' : ''}</p>`;
+  },
+
+  paintIns({ M, filas, hoy }, bt, semAct, semAnt) {
+    const f = S.f.pron, out = [];
+    const add = (i, html, cls = '') => out.push(`<li class="${cls}">${ic(i, 's')}<span>${html}</span></li>`);
+    if (M.vacio) { $('#pr-ins').innerHTML = `<li>${ic('hourglass', 's')}<span>Esperando los primeros retiros.</span></li>`; return; }
+    const urg = filas.filter(r => r.estado === 'urgente');
+    if (urg.length) add('siren', `<b>${urg.length === 1 ? esc(urg[0].p.nombre) + ' se acaba' : urg.length + ' premios se acaban'}</b> antes de que llegue la mercadería (${f.entrega} días): ${urg.slice(0, 4).map(r => `${esc(r.p.nombre)} ${r.agota <= hoy ? '(ya agotado)' : `(${fechaCorta(r.agota)})`}`).join(', ')}.`, 'bad');
+    if (M.n >= 7) {
+      const ds = [0, 1, 2, 3, 4, 5, 6].filter(d => M.nW[d] > 0);
+      const top = ds.reduce((a, b) => M.idx[b] > M.idx[a] ? b : a, ds[0]), low = ds.reduce((a, b) => M.idx[b] < M.idx[a] ? b : a, ds[0]);
+      if (M.idx[top] > 1.1) add('trending-up', `Los <b>${DOW_PL[top]}</b> se retira un <b>${Math.round((M.idx[top] - 1) * 100)}% más</b> que un día promedio.`);
+      if (M.idx[low] < 0.9) add('trending-down', `Los <b>${DOW_PL[low]}</b> son los más tranquilos: un ${Math.round((1 - M.idx[low]) * 100)}% menos.`);
+    }
+    if (M.pend && M.ratio) add(M.ratio > 1 ? 'arrow-up-right' : 'arrow-down-right', `El consumo viene <b>${M.ratio > 1 ? 'subiendo' : 'bajando'}</b>: ${pct(M.ratio - 1)} cada 2 semanas. Ya está incluido en el cálculo.`);
+    else if (semAnt > 0 && Math.abs(semAct / semAnt - 1) >= 0.2 && new Date().getDay() !== 1) add('activity', `Esta semana va ${pct(semAct / semAnt - 1)} contra la semana pasada a esta altura.`);
+    const tot = sum(filas.filter(r => !r.sinDatos), r => r.necesita);
+    const big = filas.filter(r => !r.sinDatos).sort((a, b) => b.necesita - a.necesita)[0];
+    if (big && tot > 0 && big.necesita / tot > 0.25) add('crown', `<b>${esc(big.p.nombre)}</b> es el ${Math.round(big.necesita / tot * 100)}% de todo lo que se va a retirar.`);
+    if (M.merma > 0.02) add('scale', `Los faltantes de inventario suman un <b>${Math.round(M.merma * 100)}% extra</b> sobre lo registrado; el pedido ya los contempla.`);
+    const tHoy = M.cal ? M.cal.temporadaDe(ymd(hoy)) : null;
+    const tTxt = t => t.factor != null ? efectoTxt(Number(t.factor)).toLowerCase() : (M.FT && M.FT.get(nombreBase(t.nombre))) ? `automático, ${efectoTxt(M.fTemp(t)).toLowerCase()}` : 'automático: se ajusta con los primeros días';
+    if (tHoy) add('calendar-range', `Estás en <b>${esc(tHoy.nombre)}</b> (hasta el ${fechaCorta(parseYmd(tHoy.fecha_fin))}): ${tTxt(tHoy)}.`);
+    const prox = M.cal ? M.cal.temps.find(t => t.fecha > ymd(hoy) && t.fecha < ymd(addDias(hoy, f.per + f.entrega))) : null;
+    if (prox) add('calendar-range', `El ${fechaCorta(parseYmd(prox.fecha))} empieza <b>${esc(prox.nombre)}</b>: ${tTxt(prox)}. Ya está en el cálculo.`);
+    for (let i = 0; i < f.per; i++) {
+      const d = addDias(hoy, i), ff = factorFecha(M, d);
+      if (!ff.e) continue;
+      add(ff.f === 0 ? 'store' : 'calendar-heart', `${i === 0 ? 'Hoy' : i === 1 ? 'Mañana' : `El ${fechaCorta(d)}`}: <b>${esc(ff.e.nombre)}</b> · ${ff.f === 0 ? 'cerrado, no se cuenta' : ff.txt.toLowerCase()}.`);
+    }
+    const sin = filas.filter(r => r.sinDatos);
+    if (sin.length) add('circle-dashed', `${sin.length} premio(s) sin retiros en las últimas 12 semanas: ${sin.slice(0, 4).map(r => esc(r.p.nombre)).join(', ')}${sin.length > 4 ? '…' : ''}.`);
+    if (bt) add('target', `Precisión: la semana pasada pronosticó ${fU(bt.pred)} y se retiraron ${fU(bt.act)} (${Math.round(bt.semana * 100)}% de diferencia).`);
+    $('#pr-ins').innerHTML = out.join('') || `<li>${ic('circle-check', 's')}<span>Todo en orden: nada se acaba en el período.</span></li>`;
+  },
+
+  paintTabla(plan) {
+    const f = S.f.pron, filas = this.filasVisibles();
+    $('#pr-t-sub').textContent = `Para ${f.per} días · margen ${MARGENES[f.margen].t.toLowerCase()} · llega en ${f.entrega} día(s)`;
+    const alc = r => r.sinDatos ? '<span class="muted">Sin retiros</span>' : !r.agota ? '<span class="muted">Más de 4 meses</span>' : r.agota <= plan.hoy ? '<b class="t-out">Agotado</b>' : `${fechaCorta(r.agota)} <span class="muted">(${Math.round((r.agota - plan.hoy) / DIA_MS)} d)</span>`;
+    const comp = r => r.pedido > 0 ? `<b>${fNum(r.pedido)}</b>${r.paquetes ? `<div class="t2">${r.paquetes} ${r.paquetes > 1 ? 'paquetes' : 'paquete'} de ${r.pk}</div>` : ''}` : '<span class="muted">—</span>';
+    const est = r => { const e = ESTADO_PR[r.estado]; return `<span class="badge ${e.c}">${ic(e.i, 's')}${e.t}</span>`; };
+    $('#pr-tb').innerHTML = filas.length ? filas.map(r => `
+      <tr data-pp="${r.p.id}" class="clk" title="Ver el detalle de ${esc(r.p.nombre)}">
+        <td><div class="pcell">${thumb(r.p)}<div style="min-width:0"><div class="pname">${esc(r.p.nombre)}</div><div class="pcode">${esc(catName(r.p.categoria_id))}</div></div></div></td>
+        <td class="n num">${stockSpan(r.p)}</td>
+        <td class="n num">${r.sinDatos ? '—' : (r.porDia < 10 ? r.porDia.toFixed(1).replace('.', ',') : fU(r.porDia))}</td>
+        <td class="n num">${r.sinDatos ? '—' : `~${fU(r.necesita)}<div class="t2">${fU(r.lo)} a ${fU(r.hi)}</div>`}</td>
+        <td>${alc(r)}</td>
+        <td class="n num">${comp(r)}</td>
+        <td>${est(r)}</td>
+        <td class="mob"><div class="mrow">${thumb(r.p)}<div class="grow"><div class="t1">${esc(r.p.nombre)}</div>
+          <div class="t2">Stock ${fNum(r.p.stock_actual)}${r.sinDatos ? '' : ` · ~${r.porDia < 10 ? r.porDia.toFixed(1).replace('.', ',') : fU(r.porDia)} por día`}</div>
+          <div class="t3">Alcanza hasta: ${alc(r)}</div><div style="margin-top:6px">${est(r)}</div></div>
+          <div class="mr"><span class="t2">Comprar</span><span class="big">${r.pedido > 0 ? fNum(r.pedido) : '—'}</span>${r.paquetes ? `<span class="t2">${r.paquetes} × ${r.pk}</span>` : ''}</div></div></td>
+      </tr>`).join('') : emptyRow(7, f.soloComprar ? 'No hace falta comprar nada' : 'No hay premios activos', f.soloComprar ? 'Con el stock actual alcanza para todo el período.' : '', 'circle-check');
+  },
+
+  paintFechas() {
+    const f = S.f.pron, box = $('#pr-fechas'); if (!box) return;
+    const hoyK = ymd(new Date()), lim = ymd(addDias(new Date(), 60));
+    const todas = (S.especiales || []).filter(e => (e.fecha_fin || e.fecha) >= hoyK).sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const lista = f.todas ? todas : todas.filter(e => e.fecha <= lim);
+    const M = this.plan ? this.plan.M : modeloPronostico({});
+    const admin = rolActual() === 'admin';
+    const mes = d => d.toLocaleDateString('es-AR', { month: 'short' }).replace('.', '');
+    box.innerHTML = lista.length ? lista.map(e => {
+      const d = parseYmd(e.fecha), rango = esRango(e);
+      let f1, txt;
+      if (rango) { f1 = M.fTemp ? M.fTemp(e) : (e.factor != null ? Number(e.factor) : 1); txt = e.factor != null ? efectoTxt(f1) : (M.FT && M.FT.get(nombreBase(e.nombre))) ? `Automático: ${efectoTxt(f1)}` : 'Automático: aprende al empezar'; }
+      else if (esCerrado(e)) { f1 = 0; txt = 'Cerrado'; }
+      else if (e.factor != null) { f1 = Number(e.factor); txt = efectoTxt(f1); }
+      else if (esFeriado(e)) { f1 = M.F || 1; txt = M.nFer ? `Automático: ${efectoTxt(f1)}` : 'Automático: como un día normal'; }
+      else { f1 = 1; txt = 'Normal'; }
+      const cls = (f1 === 0 || /aprende|normal/i.test(txt)) ? 'mute' : f1 > 1.03 ? 'low' : f1 < 0.97 ? 't-salida' : 'ok';
+      const d2 = rango ? parseYmd(e.fecha_fin) : null;
+      const sub = rango ? `Del ${d.getDate()} ${mes(d)} al ${d2.getDate()} ${mes(d2)} · ${Math.round((d2 - d) / DIA_MS) + 1} días` : `${DOW_SG[d.getDay()][0].toUpperCase() + DOW_SG[d.getDay()].slice(1)} · ${{ feriado: 'Feriado', no_laborable: 'No laborable', evento: 'Evento', cerrado: 'Cierre' }[e.tipo] || ''}`;
+      return `<li class="${rango ? 'temp' : ''}"><div class="fe-d">${rango ? ic('calendar-range', 's') : `<b>${d.getDate()}</b>`}<span>${rango ? mes(d) : mes(d)}</span></div>
+        <div class="grow"><div class="t1">${esc(e.nombre)}</div><div class="t2">${sub}</div></div>
+        <span class="badge ${cls}">${txt}</span>
+        ${admin ? `<button class="btn sm icon ghost" data-fe="${e.id}" title="Editar" aria-label="Editar ${esc(e.nombre)}">${ic('pencil', 's')}</button>` : ''}</li>`;
+    }).join('') : `<li class="keep"><div class="grow"><div class="t2">${S.especialesErr ? 'Falta ejecutar la migración 08 para guardar fechas especiales.' : 'No hay fechas especiales ni temporadas en los próximos 60 días.'}</div></div></li>`;
+    const resto = todas.length - lista.length;
+    const bt = $('#pr-todas');
+    bt.textContent = f.todas ? 'Ver solo los próximos 60 días' : resto > 0 ? `Ver todas (${resto} más)` : '';
+    bt.style.display = (f.todas || resto > 0) ? '' : 'none';
+  }
+};
+
+function modalFecha(e) {
+  if (S.especialesErr) { toast('Primero hay que ejecutar en Supabase el archivo migracion_08_pronostico.sql.', 'warn'); return; }
+  const nuevo = !e;
+  const efActual = e ? (e.factor == null ? '' : String(Number(e.factor))) : '1';
+  const m = modal({
+    title: nuevo ? 'Agregar fecha especial' : 'Editar fecha especial',
+    body: `<form id="fe-f" class="stack">
+      <div class="form-err" id="fe-err"></div>
+      <div class="grid2">
+        <div class="field"><label for="fe-d">Fecha</label><input class="in" type="date" id="fe-d" value="${e ? e.fecha : ymd(addDias(new Date(), 1))}" required></div>
+        <div class="field"><label for="fe-h">Hasta <span class="muted">(solo temporadas)</span></label><input class="in" type="date" id="fe-h" value="${e && e.fecha_fin ? e.fecha_fin : ''}"></div>
+      </div>
+      <div class="field"><label for="fe-n">Nombre</label><input class="in" id="fe-n" maxlength="80" placeholder="Ej.: Vacaciones del equipo, acción especial en el shopping" value="${e ? esc(e.nombre) : ''}" required></div>
+      <div class="field"><label for="fe-t">Tipo</label><select class="in" id="fe-t">
+        ${[['temporada', 'Temporada (varios días: vacaciones, vuelta a clases, fiestas)'], ['evento', 'Evento (acción, promoción, día movido)'], ['feriado', 'Feriado (se abre)'], ['no_laborable', 'Día no laborable (se abre)'], ['cerrado', 'Cierre (no se abre)']].map(([v, t]) => `<option value="${v}" ${(e ? e.tipo === v : v === 'evento') ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+      <div class="field"><label for="fe-x">¿Cómo cambia el consumo ese día?</label><select class="in" id="fe-x">
+        ${EFECTOS.map(x => `<option value="${x.v}" ${x.v === efActual ? 'selected' : ''}>${x.t}</option>`).join('')}</select>
+        <span class="hint">Si no sabes cuánto cambia, deja "Automático": en feriados lo calcula con feriados anteriores, y en temporadas compara con las semanas previas y con la misma temporada del año anterior.</span></div>
+    </form>`,
+    foot: `${nuevo ? '' : '<button class="btn danger" id="fe-del" type="button">Eliminar</button><span class="sp"></span>'}<button class="btn" data-close>Cancelar</button><button class="btn pri" id="fe-ok">${nuevo ? 'Agregar' : 'Guardar'}</button>`
+  });
+  const tipo = m.$('#fe-t'), ef = m.$('#fe-x'), hasta = m.$('#fe-h');
+  tipo.onchange = () => { if (tipo.value === 'cerrado') ef.value = '0'; else if (ef.value === '0') ef.value = tipo.value === 'evento' ? '1' : ''; if (tipo.value === 'temporada' && !hasta.value) hasta.focus(); };
+  hasta.onchange = () => { if (hasta.value && hasta.value > m.$('#fe-d').value) { tipo.value = 'temporada'; if (ef.value === '0') ef.value = ''; } };
+  ef.onchange = () => { if (ef.value === '0') tipo.value = 'cerrado'; else if (tipo.value === 'cerrado') tipo.value = 'evento'; };
+  const guardar = async () => {
+    const fecha = m.$('#fe-d').value, nombre = m.$('#fe-n').value.trim();
+    let fecha_fin = tipo.value === 'temporada' ? (hasta.value || null) : null;
+    if (!fecha || !nombre) return showErr(m.$('#fe-err'), 'Completa la fecha y el nombre.');
+    if (tipo.value === 'temporada' && !fecha_fin) return showErr(m.$('#fe-err'), 'Una temporada necesita la fecha de inicio y la fecha "Hasta".');
+    if (fecha_fin && fecha_fin <= fecha) return showErr(m.$('#fe-err'), 'La fecha "Hasta" tiene que ser posterior a la de inicio.');
+    let factor = ef.value === '' ? null : Number(ef.value);
+    if (factor == null && tipo.value === 'evento') factor = 1;
+    const datos = { fecha, fecha_fin, nombre, tipo: tipo.value, factor };
+    await busy(m.$('#fe-ok'), async () => {
+      try {
+        const row = nuevo ? await API.crearFecha({ ...datos, creado_por: S.perfil.id }) : await API.editarFecha(e.id, datos);
+        S.especiales = (S.especiales || []).filter(x => x.id !== row.id).concat(row);
+        m.close(); toast(nuevo ? 'Fecha agregada. El pronóstico ya la tiene en cuenta.' : 'Fecha actualizada.', 'ok', 3000); paintCurrent();
+      } catch (er) { showErr(m.$('#fe-err'), /duplicate|unique/i.test(errMsg(er)) ? 'Ya hay una fecha especial ese día: edítala desde la lista.' : errMsg(er)); }
+    });
+  };
+  m.$('#fe-ok').onclick = guardar;
+  m.$('#fe-f').onsubmit = ev => { ev.preventDefault(); guardar(); };
+  if (!nuevo) m.$('#fe-del').onclick = async () => {
+    m.close();
+    if (!await confirmar({ title: 'Eliminar fecha especial', body: `<p>Se elimina <b>${esc(e.nombre)}</b> (${fFecha(parseYmd(e.fecha))}${esRango(e) ? ` al ${fFecha(parseYmd(e.fecha_fin))}` : ''}) y ${esRango(e) ? 'esos días pasan' : 'ese día pasa'} a calcularse como normales.</p>`, ok: 'Eliminar', danger: true })) return;
+    try { await API.borrarFecha(e.id); S.especiales = S.especiales.filter(x => x.id !== e.id); toast('Fecha eliminada.', 'ok', 2500); paintCurrent(); }
+    catch (er) { toast('No se pudo eliminar: ' + esc(errMsg(er)), 'bad'); }
+  };
+}
+
+function modalPronPremio(id) {
+  const v = VIEWS.pronostico, plan = v.plan; if (!plan) return;
+  const r = plan.filas.find(x => x.p.id === id); if (!r) return;
+  const f = S.f.pron, p = r.p, hoy = plan.hoy, pr = plan.P.get(id);
+  const regPorDia = new Map();
+  salidasVig().filter(m => m.premio_id === id).forEach(m => { const k = ymd(m.creado_en); regPorDia.set(k, (regPorDia.get(k) || 0) + qtyEf(m)); });
+  const md = modal({
+    title: esc(p.nombre), size: 'lg',
+    body: `<div class="kpis k3" style="margin-bottom:12px">
+        <div class="kpi"><span class="kpi-l">Stock</span><span class="kpi-v">${fNum(p.stock_actual)}</span><span class="kpi-s">Mínimo ${fNum(p.stock_minimo)}</span></div>
+        <div class="kpi"><span class="kpi-l">Por día</span><span class="kpi-v">${r.sinDatos ? '—' : r.porDia.toFixed(1).replace('.', ',')}</span><span class="kpi-s">${r.t && r.t.fal ? `Incluye ${Math.round(r.t.m * 100)}% de faltantes` : 'Promedio reciente'}</span></div>
+        <div class="kpi"><span class="kpi-l">Comprar</span><span class="kpi-v">${r.pedido ? fNum(r.pedido) : '—'}</span><span class="kpi-s">${r.paquetes ? `${r.paquetes} paquete(s) de ${r.pk}` : r.sinDatos ? 'Sin retiros recientes' : `Cubre ~${fU(r.cubre || 0)} en ${f.per} días`}</span></div>
+      </div>
+      <div class="chart-box" style="height:240px;padding:0"><canvas id="pp-ch" aria-label="Consumo de ${esc(p.nombre)}"></canvas></div>
+      <p class="muted" style="margin:10px 0 0">${r.sinDatos ? 'Sin retiros en las últimas 12 semanas.' : !r.agota ? 'Con el consumo actual alcanza por más de 4 meses.' : r.agota <= hoy ? 'Está agotado.' : `Al ritmo actual se acaba el <b>${fechaCorta(r.agota)}</b>.`}
+      ${Number(p.unidades_por_paquete) > 1 ? '' : ' Si viene en cajas o bolsas, carga cuántas unidades trae cada una en "Editar premio" y el pedido se redondea solo.'}</p>`,
+    foot: `${rolActual() === 'admin' ? '<button class="btn" id="pp-ed">Editar premio</button>' : ''}<span class="sp"></span><button class="btn pri" data-close>Listo</button>`
+  });
+  const ed = md.$('#pp-ed'); if (ed) ed.onclick = () => { md.close(); modalPremio(p); };
+  const c = chartColors(), L = [], A = [], F = [];
+  for (let i = -20; i < f.per; i++) {
+    const d = addDias(hoy, i);
+    L.push(i === 0 ? 'Hoy' : fDiaC(d));
+    A.push(i <= 0 ? (regPorDia.get(ymd(d)) || 0) : 0);
+    F.push(i >= 0 && pr ? Math.round(pr.e[i] * 10) / 10 : 0);
+  }
+  const o = chartOpts(c, true); o.scales.x.stacked = true; o.scales.y.stacked = true;
+  const ch = new window.Chart(md.$('#pp-ch'), { type: 'bar', data: { labels: L, datasets: [
+    { label: 'Retirado', data: A, backgroundColor: c.s2, borderRadius: 3, stack: 's', maxBarThickness: 18 },
+    { label: 'Pronóstico', data: F, backgroundColor: c.s2 + '38', borderColor: c.s2, borderWidth: { top: 2, left: 0, right: 0, bottom: 0 }, borderSkipped: false, borderRadius: 3, stack: 's', maxBarThickness: 18 }] }, options: o });
+  const obs = new MutationObserver(() => { if (!document.body.contains(md.el)) { ch.destroy(); obs.disconnect(); } });
+  obs.observe($('#modals'), { childList: true });
+}
 
 /* =============================================================
    VISTA: DASHBOARD
@@ -1336,6 +2053,7 @@ function modalPremio(p) {
           <div class="field"><label for="pmin">Stock mínimo</label><input class="in num" id="pmin" type="number" min="0" step="1" value="${p ? p.stock_minimo : 5}"><span class="hint">Avisa cuando el stock llega a este número.</span></div>
           ${nuevo ? `<div class="field"><label for="pini">Stock inicial</label><input class="in num" id="pini" type="number" min="0" step="1" value="0"><span class="hint">Se registra como ingreso.</span></div>` : ''}
         </div>
+        ${!S.especialesErr ? `<div class="field"><label for="ppaq">Viene en cajas o bolsas de</label><input class="in num" id="ppaq" type="number" min="1" step="1" placeholder="Opcional" value="${p && p.unidades_por_paquete ? p.unidades_por_paquete : ''}"><span class="hint">Unidades por caja, bolsa o paquete. El pedido sugerido se redondea a paquetes completos.</span></div>` : ''}
         ${!nuevo ? `<div class="callout info">${ic('info', 's')}<span>El stock no se edita aquí. Usa <b>Registrar Movimiento</b> (ingreso o ajuste) para que quede en el historial.</span></div>` : ''}
       </form>`,
     foot: `<button class="btn" data-close>Cancelar</button><button class="btn pri" id="psave">${nuevo ? 'Crear premio' : 'Guardar cambios'}</button>`
@@ -1356,11 +2074,14 @@ function modalPremio(p) {
     if (!codigo) return showErr(m.$('#pe'), 'Completa el código.');
     if (isNaN(min) || min < 0) return showErr(m.$('#pe'), 'El stock mínimo debe ser 0 o mayor.');
     if (isNaN(ini) || ini < 0) return showErr(m.$('#pe'), 'El stock inicial debe ser 0 o mayor.');
+    const paqIn = m.$('#ppaq'), paq = paqIn && paqIn.value.trim() ? parseInt(paqIn.value, 10) : null;
+    if (paq != null && (isNaN(paq) || paq < 1)) return showErr(m.$('#pe'), 'Las unidades por caja deben ser 1 o más (o dejar vacío).');
     try {
       let imagen_url = p ? p.imagen_url : null;
       if (blob) imagen_url = await API.subirImagen(blob);
       else if (quitar) imagen_url = null;
       const datos = { nombre, codigo, descripcion: m.$('#pd').value.trim() || null, categoria_id: m.$('#pcat').value ? +m.$('#pcat').value : null, stock_minimo: min, imagen_url };
+      if (paqIn) datos.unidades_por_paquete = paq;
       let row;
       if (nuevo) {
         row = await API.crearPremio({ ...datos, creado_por: S.perfil.id });
@@ -2891,9 +3612,9 @@ async function borrarUsuario(u) {
 /* =============================================================
    VISTA: AUDITORÍA
    ============================================================= */
-const TABLAS_AUD = { premios: 'Premios', movimientos: 'Movimientos', perfiles: 'Usuarios', categorias: 'Categorías', configuracion: 'Configuración', sectores: 'Sectores' };
+const TABLAS_AUD = { premios: 'Premios', movimientos: 'Movimientos', perfiles: 'Usuarios', categorias: 'Categorías', configuracion: 'Configuración', sectores: 'Sectores', integrantes: 'Equipo', fechas_especiales: 'Fechas especiales' };
 const CAMPOS = {
-  nombre: 'Nombre', codigo: 'Código', descripcion: 'Descripción', categoria_id: 'Categoría', imagen_url: 'Imagen', stock_minimo: 'Stock mínimo',
+  nombre: 'Nombre', codigo: 'Código', descripcion: 'Descripción', categoria_id: 'Categoría', imagen_url: 'Imagen', stock_minimo: 'Stock mínimo', unidades_por_paquete: 'Unidades por paquete', fecha: 'Fecha', factor: 'Efecto',
   activo: 'Activo', usuario: 'Usuario', sector_ids: 'Sectores', sector_nombre: 'Sector', grupo: 'Grupo', orden: 'Orden', nombre_completo: 'Nombre completo', rol: 'Rol', valor: 'Valor', clave: 'Clave',
   estado: 'Estado', cantidad: 'Cantidad', cantidad_corregida: 'Cantidad corregida', motivo_modificacion: 'Motivo', modificado_por_nombre: 'Modificado por',
   stock_actual: 'Stock actual', premio_nombre: 'Premio', tipo: 'Tipo', delta: 'Efecto en stock', observacion: 'Observación', usuario_nombre: 'Registrado por',
@@ -3255,7 +3976,8 @@ function startRealtime() {
         setLive('on');
       } else if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(st)) { S.wasOff = true; setLive('off'); }
     },
-    change: onChange
+    change: onChange,
+    extra: S.especialesErr ? [] : ['fechas_especiales']
   });
 }
 function onChange(table, p) {
@@ -3279,6 +4001,8 @@ function onChange(table, p) {
     API.sectores().then(x => { S.sectores = x; paintCurrent(); }).catch(() => {});
   } else if (table === 'categorias') {
     API.categorias().then(c => { S.categorias = c; paintCurrent(); }).catch(() => {});
+  } else if (table === 'fechas_especiales') {
+    API.fechasEspeciales().then(x => { S.especiales = x; paintCurrent(); }).catch(() => {});
   } else if (table === 'configuracion' && n && n.clave) {
     S.config[n.clave] = n.valor; paintBrand();
   }
